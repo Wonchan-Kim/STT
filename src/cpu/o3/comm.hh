@@ -225,7 +225,7 @@ struct TimeStruct
         /// Hack for now to send back an strictly ordered access to
         /// the IEW stage.
         bool strictlyOrdered = false; // *I
-
+        bool clearControlSpecTaint = false;
     };
 
     CommitComm commitInfo[MaxThreads];

@@ -38,3 +38,13 @@ configs/dram/lowp_sweep.cfg
 .vscode
 typings
 .DS_Store
+
+# Ignore run outputs
+runs/
+*.out
+m5out/
+
+# generated outputs
+runs/
+*.out
+m5out/

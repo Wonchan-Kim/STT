@@ -206,6 +206,20 @@ class BaseO3CPU(BaseCPU):
         "Branch Predictor",
     )
     needsTSO = Param.Bool(False, "Enable TSO Memory model")
+    
+    stt = Param.Bool(False, "Enable Speculative Taint Tracking")
+    implicitChannel = Param.Bool(
+        False,
+        "Delay branch-predictor-visible control effects for tainted branches",
+    )
+    explicitChannel = Param.Bool(
+        False,
+        "Delay data exposure for tainted speculative loads",
+    )
+    futuristicModel = Param.Bool(
+        False,
+        "Use the STT futuristic/threat-model behavior",
+    )
 
     recvRespThrottling = Param.Bool(
         False, "Enable load receive response throttling in the LSQ"

@@ -111,6 +111,10 @@ CPU::CPU(const BaseO3CPUParams &params)
 
       globalSeqNum(1),
       globalFTSeqNum(1),
+      sttEnabled(params.stt),
+      implicitChannelEnabled(params.implicitChannel),
+      explicitChannelEnabled(params.explicitChannel),
+      futuristicModelEnabled(params.futuristicModel),
       system(params.system),
       lastRunningCycle(curCycle()),
       cpuStats(this)
@@ -1058,7 +1062,24 @@ CPU::setReg(PhysRegIdPtr phys_reg, RegVal val, ThreadID tid)
     }
     regFile.setReg(phys_reg, val);
 }
+bool
+CPU::isRegTainted(PhysRegIdPtr reg) const
+{
+    if (!reg || reg->is(InvalidRegClass))
+        return false;
 
+    auto it = regTaint.find(reg);
+    return it != regTaint.end() ? it->second : false;
+}
+
+void
+CPU::setRegTaint(PhysRegIdPtr reg, bool tainted)
+{
+    if (!reg || reg->is(InvalidRegClass))
+        return;
+
+    regTaint[reg] = tainted;
+}
 void
 CPU::setReg(PhysRegIdPtr phys_reg, const void *val, ThreadID tid)
 {

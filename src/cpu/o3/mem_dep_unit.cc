@@ -51,7 +51,12 @@ int MemDepUnit::MemDepEntry::memdep_insert = 0;
 int MemDepUnit::MemDepEntry::memdep_erase = 0;
 #endif
 
-MemDepUnit::MemDepUnit() : iqPtr(NULL), stats(nullptr) {}
+MemDepUnit::MemDepUnit()
+    : iqPtr(NULL),
+      sttEnabled(false),
+      implicitChannelEnabled(false),
+      stats(nullptr)
+{}
 
 MemDepUnit::MemDepUnit(const BaseO3CPUParams &params)
     : _name(params.name + ".memdepunit"),
@@ -59,6 +64,8 @@ MemDepUnit::MemDepUnit(const BaseO3CPUParams &params)
               params.SSITSize, params.SSITAssoc, params.SSITReplPolicy,
               params.SSITIndexingPolicy, params.LFSTSize),
       iqPtr(NULL),
+      sttEnabled(params.stt),
+      implicitChannelEnabled(params.implicitChannel),
       stats(nullptr)
 {
     DPRINTF(MemDepUnit, "Creating MemDepUnit object.\n");
@@ -96,6 +103,9 @@ MemDepUnit::init(const BaseO3CPUParams &params, ThreadID tid, CPU *cpu)
     DPRINTF(MemDepUnit, "Creating MemDepUnit %i object.\n",tid);
 
     id = tid;
+
+    sttEnabled = params.stt;
+    implicitChannelEnabled = params.implicitChannel;
 
     depPred.init(params.store_set_clear_period,
                  params.SSITSize, params.SSITAssoc, params.SSITReplPolicy,
@@ -226,7 +236,58 @@ MemDepUnit::insert(const DynInstPtr &inst)
         if (dep != 0)
             producing_stores.push_back(dep);
     }
+    bool sttConservativeMemDep =
+        sttEnabled &&
+        implicitChannelEnabled &&
+        inst->isMemRef() &&
+        (inst->isArgsTainted() ||
+         inst->isControlTainted() ||
+         inst->isDataTainted() ||
+         inst->isAddrTainted());
 
+    if (sttConservativeMemDep) {
+        DPRINTF(MemDepUnit,
+                "STT: considering conservative mem-dep handling for [sn:%lli] PC %s\n",
+                inst->seqNum, inst->pcState());
+
+        // If the predictor found no dependency, conservatively depend on all
+        // older in-flight stores/atomics/barriers in this thread.
+                if (producing_stores.empty()) {
+            InstSeqNum latest_producer = 0;
+            bool found_latest = false;
+
+            for (auto list_it = instList[tid].begin();
+                 list_it != instList[tid].end(); ++list_it) {
+                const DynInstPtr &older_inst = *list_it;
+
+                if (older_inst == inst)
+                    continue;
+
+                if (older_inst->seqNum >= inst->seqNum)
+                    continue;
+
+                if (older_inst->isStore() ||
+                    older_inst->isAtomic() ||
+                    older_inst->isReadBarrier() ||
+                    older_inst->isWriteBarrier() ||
+                    older_inst->isHtmCmd()) {
+
+                    if (!found_latest || older_inst->seqNum > latest_producer) {
+                        latest_producer = older_inst->seqNum;
+                        found_latest = true;
+                    }
+                }
+            }
+
+            if (found_latest) {
+                producing_stores.push_back(latest_producer);
+
+                DPRINTF(MemDepUnit,
+                        "STT: forcing conservative mem-dep on [sn:%lli] with latest older producer [sn:%lli]\n",
+                        inst->seqNum, latest_producer);
+            }
+        }
+    }
     std::vector<MemDepEntryPtr> store_entries;
 
     // If there is a producing store, try to find the entry.
@@ -610,7 +671,6 @@ MemDepUnit::moveToReady(MemDepEntryPtr &woken_inst_entry)
 
     iqPtr->addReadyMemInst(woken_inst_entry->inst);
 }
-
 
 void
 MemDepUnit::dumpLists()

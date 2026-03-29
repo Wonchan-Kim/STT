@@ -207,11 +207,17 @@ class Fetch
     ProbePointArg<RequestPtr> *ppFetchRequestSent;
 
     Random::RandomPtr rng = Random::genRandom();
+    bool sttEnabled;
+    bool implicitChannelEnabled;
+    bool controlSpecTaint[MaxThreads];
+    InstSeqNum controlSpecTaintRoot[MaxThreads];
 
   public:
     /** Fetch constructor. */
     Fetch(CPU *_cpu, const BaseO3CPUParams &params);
 
+    void clearControlSpecTaint(ThreadID tid);
+    
     /** Returns the name of fetch. */
     std::string name() const;
 

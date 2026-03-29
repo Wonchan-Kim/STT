@@ -260,7 +260,8 @@ class MemDepUnit
 
     /** Pointer to the IQ. */
     InstructionQueue *iqPtr;
-
+    bool sttEnabled;
+    bool implicitChannelEnabled;
     /** The thread id of this memory dependence unit. */
     int id;
     struct MemDepUnitStats : public statistics::Group

@@ -49,6 +49,7 @@
 #include <queue>
 #include <set>
 #include <vector>
+#include <unordered_map>
 
 #include "arch/generic/pcstate.hh"
 #include "base/statistics.hh"
@@ -100,6 +101,7 @@ class CPU : public BaseCPU
 
     friend class ThreadContext;
 
+  
   public:
     enum Status
     {
@@ -118,6 +120,12 @@ class CPU : public BaseCPU
 
     /** Overall CPU status. */
     Status _status;
+
+    bool sttEnabled;
+    std::unordered_map<PhysRegIdPtr, bool> regTaint;
+    bool implicitChannelEnabled;
+    bool explicitChannelEnabled;
+    bool futuristicModelEnabled;
 
   private:
 
@@ -187,7 +195,8 @@ class CPU : public BaseCPU
     {
         mmu->demapPage(vaddr, asn);
     }
-
+    bool isRegTainted(PhysRegIdPtr reg) const;
+    void setRegTaint(PhysRegIdPtr reg, bool tainted);
     /** Ticks CPU, calling tick() on each stage, and checking the overall
      *  activity to see if the CPU should deschedule itself.
      */

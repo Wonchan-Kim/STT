@@ -115,6 +115,8 @@ Fetch::IcachePort::IcachePort(Fetch *_fetch, CPU *_cpu) :
 Fetch::Fetch(CPU *_cpu, const BaseO3CPUParams &params)
     : fetchPolicy(params.smtFetchPolicy),
       cpu(_cpu),
+      sttEnabled(params.stt),
+      implicitChannelEnabled(params.implicitChannel),
       bac(nullptr),
       ftq(nullptr),
       decoupledFrontEnd(params.decoupledFrontEnd),
@@ -170,6 +172,8 @@ Fetch::Fetch(CPU *_cpu, const BaseO3CPUParams &params)
         fetchBufferValid[i] = false;
         lastIcacheStall[i] = 0;
         issuePipelinedIfetch[i] = false;
+        controlSpecTaint[i] = false;
+        controlSpecTaintRoot[i] = 0;
     }
 
     for (ThreadID tid = 0; tid < numThreads; tid++) {
@@ -184,6 +188,15 @@ Fetch::Fetch(CPU *_cpu, const BaseO3CPUParams &params)
 }
 
 std::string Fetch::name() const { return cpu->name() + ".fetch"; }
+
+void
+Fetch::clearControlSpecTaint(ThreadID tid)
+{
+    controlSpecTaint[tid] = false;
+    controlSpecTaintRoot[tid] = 0;
+
+    DPRINTF(Fetch, "[tid:%i] STT: cleared control-spec taint window\n", tid);
+}
 
 void
 Fetch::regProbePoints()
@@ -306,6 +319,8 @@ Fetch::clearStates(ThreadID tid)
     fetchBufferPC[tid] = 0;
     fetchBufferValid[tid] = false;
     fetchQueue[tid].clear();
+    controlSpecTaint[tid] = false;
+    controlSpecTaintRoot[tid] = 0;
 
     // TODO not sure what to do with priorityList for now
     // priorityList.push_back(tid);
@@ -344,7 +359,9 @@ Fetch::resetStage()
         fetchBufferValid[tid] = false;
 
         fetchQueue[tid].clear();
-
+                
+        controlSpecTaint[tid] = false;
+        controlSpecTaintRoot[tid] = 0;
         priorityList.push_back(tid);
     }
 
@@ -748,6 +765,8 @@ Fetch::doSquash(const PCStateBase &new_pc, const DynInstPtr squashInst,
     // Empty fetch queue
     fetchQueue[tid].clear();
 
+    controlSpecTaint[tid] = false;
+    controlSpecTaintRoot[tid] = 0;
     // microops are being squashed, it is not known wheather the
     // youngest non-squashed microop was  marked delayed commit
     // or not. Setting the flag to true ensures that the
@@ -928,7 +947,10 @@ Fetch::checkSignalsAndUpdate(ThreadID tid)
         assert(!fromDecode->decodeBlock[tid]);
         stalls[tid].decode = false;
     }
-
+    if (fromCommit->commitInfo[tid].clearControlSpecTaint) {
+        clearControlSpecTaint(tid);
+        return true;
+    }
     // Check squash signals from commit.
     if (fromCommit->commitInfo[tid].squash) {
         DPRINTF(Fetch, "[tid:%i] Squashing from commit with PC = %s\n", tid,
@@ -1017,8 +1039,41 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
     DynInstPtr instruction = new (arrays) DynInst(
             arrays, staticInst, curMacroop, this_pc, next_pc, seq, cpu);
     instruction->setTid(tid);
-
     instruction->setThreadState(cpu->thread[tid]);
+
+    // If we are already under a tainted speculative-control window,
+    // taint younger instructions fetched in that window.
+        if (sttEnabled && controlSpecTaint[tid]) {
+        instruction->setControlTainted(true);
+
+        if (instruction->isMemRef()) {
+            instruction->setArgsTainted(true);
+            instruction->setAddrTainted(true);
+            instruction->setDataTainted(true);
+
+            DPRINTF(Fetch,
+                    "[tid:%i] [sn:%llu] STT: younger mem inst tainted under control-spec window (root sn:%llu)\n",
+                    tid, instruction->seqNum, controlSpecTaintRoot[tid]);
+        } else {
+            DPRINTF(Fetch,
+                    "[tid:%i] [sn:%llu] STT: younger non-mem inst control-tainted under control-spec window (root sn:%llu)\n",
+                    tid, instruction->seqNum, controlSpecTaintRoot[tid]);
+        }
+    }
+
+    // A tainted conditional-control instruction starts a speculative taint
+    // window for younger instructions.
+    if (sttEnabled && instruction->isCondCtrl()) {
+        instruction->setArgsTainted(true);
+        instruction->setControlTainted(true);
+
+        controlSpecTaint[tid] = true;
+        controlSpecTaintRoot[tid] = instruction->seqNum;
+
+        DPRINTF(Fetch,
+                "[tid:%i] [sn:%llu] STT: conditional control marked tainted in fetch; opened control-spec window\n",
+                tid, instruction->seqNum);
+    }
 
     DPRINTF(Fetch, "[tid:%i] Instruction PC %s created [sn:%lli].\n",
             tid, this_pc, seq);
@@ -1039,6 +1094,17 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
     // Add instruction to the CPU's list of instructions.
     instruction->setInstListIt(cpu->addInst(instruction));
 
+    if (instruction->isArgsTainted() || instruction->isControlTainted() ||
+        instruction->isDataTainted() || instruction->isAddrTainted()) {
+        DPRINTF(Fetch,
+                "[tid:%i] [sn:%llu] STT: after addInst args=%d ctrl=%d data=%d addr=%d\n",
+                tid, instruction->seqNum,
+                instruction->isArgsTainted(),
+                instruction->isControlTainted(),
+                instruction->isDataTainted(),
+                instruction->isAddrTainted());
+    }
+
     // Write the instruction to the first slot in the queue
     // that heads to decode.
     assert(numInst < fetchWidth);
@@ -1046,7 +1112,6 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
     assert(fetchQueue[tid].size() <= fetchQueueSize);
     DPRINTF(Fetch, "[tid:%i] Fetch queue entry created (%i/%i).\n",
             tid, fetchQueue[tid].size(), fetchQueueSize);
-    //toDecode->insts[toDecode->size++] = instruction;
 
     // Keep track of if we can take an interrupt at this boundary
     delayedCommit[tid] = instruction->isDelayedCommit();
@@ -1285,11 +1350,38 @@ Fetch::fetch(bool &status_change)
 
             // If we're branching after this instruction, quit fetching
             // from the same block.
+                        // If we're branching after this instruction, quit fetching
+            // from the same block.
             predictedBranch |= this_pc.branching();
 
-            // Get the next PC from the BAC stage.
-            predictedBranch |= bac->updatePC(instruction, *next_pc, curFT);
+            bool suppressImplicitBranchPred =
+                sttEnabled &&
+                implicitChannelEnabled &&
+                instruction->isCondCtrl() &&
+                instruction->isControlTainted();
 
+            if (suppressImplicitBranchPred) {
+                /*
+                 * Minimal STT implicit-channel policy:
+                 * do not let tainted conditional control influence the BAC.
+                 * Instead, follow the architectural fall-through path only.
+                 */
+                instruction->staticInst->advancePC(*next_pc);
+
+                DPRINTF(Fetch,
+                        "[tid:%i] [sn:%llu] STT: suppressing BAC update for tainted conditional control\n",
+                        tid, instruction->seqNum);
+            } else {
+                // Get the next PC from the BAC stage.
+                predictedBranch |= bac->updatePC(instruction, *next_pc, curFT);
+            }
+
+            if (instruction->isCondCtrl() && instruction->isArgsTainted()) {
+                DPRINTF(Fetch,
+                        "[tid:%i] [sn:%llu] STT: tainted conditional control processed, predictedBranch=%d nextPC=%s\n",
+                        tid, instruction->seqNum, predictedBranch, *next_pc);
+            }
+            ///
             if (instruction->isControl()) {
                 cpu->fetchStats[tid]->numBranches++;
             }

@@ -87,6 +87,10 @@ class IEW;
  */
 class LSQUnit
 {
+  private:
+    bool sttEnabled;
+    bool implicitChannelEnabled;
+    
   public:
     static constexpr auto MaxDataBytes = MaxVecRegLenInBytes;
 

@@ -221,6 +221,11 @@ if args.elastic_trace_en:
 for cpu in system.cpu:
     cpu.clk_domain = system.cpu_clk_domain
 
+for cpu in system.cpu:
+    cpu.stt = True
+    cpu.implicitChannel = True
+    print("STT config:", cpu.stt, cpu.implicitChannel)
+
 if ObjectList.is_kvm_cpu(CPUClass) or ObjectList.is_kvm_cpu(FutureClass):
     if buildEnv["USE_X86_ISA"]:
         system.kvm_vm = KvmVM()

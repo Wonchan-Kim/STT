@@ -63,7 +63,7 @@
 #include "cpu/static_inst.hh"
 #include "cpu/translation.hh"
 #include "debug/HtmCpu.hh"
-
+#include "debug/DynInst.hh"
 namespace gem5
 {
 
@@ -139,7 +139,18 @@ class DynInst : public ExecContext, public RefCounted
 
     /** InstRecord that tracks this instructions. */
     trace::InstRecord *traceData = nullptr;
+        /** STT metadata: whether this instruction carries tainted data. */
+    bool dataTainted = false;
 
+    /** STT metadata: whether this instruction uses a tainted address. */
+    bool addrTainted = false;
+
+    /** STT metadata: whether this instruction's input arguments are tainted. */
+    bool argsTainted = false;
+
+    /** STT metadata: whether this instruction is control-tainted. */
+    bool controlTainted = false;
+    
   protected:
     enum Status
     {
@@ -381,8 +392,25 @@ class DynInst : public ExecContext, public RefCounted
     void memOpDone(bool f) { instFlags[MemOpDone] = f; }
 
     bool notAnInst() const { return instFlags[NotAnInst]; }
-    void setNotAnInst() { instFlags[NotAnInst] = true; }
 
+    void setNotAnInst() { instFlags[NotAnInst] = true; }
+    bool isDataTainted() const { return dataTainted; }
+    bool isAddrTainted() const { return addrTainted; }
+    bool isArgsTainted() const { return argsTainted; }
+    bool isControlTainted() const { return controlTainted; }
+
+    void setDataTainted(bool v) { dataTainted = v; }
+    void setAddrTainted(bool v) { addrTainted = v; }
+    void setArgsTainted(bool v) { argsTainted = v; }
+    void setControlTainted(bool v) { controlTainted = v; }
+
+    void clearTaint()
+    {
+        dataTainted = false;
+        addrTainted = false;
+        argsTainted = false;
+        controlTainted = false;
+    }
 
     ////////////////////////////////////////////
     //
@@ -1164,6 +1192,16 @@ class DynInst : public ExecContext, public RefCounted
         const PhysRegIdPtr reg = renamedSrcIdx(idx);
         if (reg->is(InvalidRegClass))
             return 0;
+
+        if (cpu->isRegTainted(reg)) {
+            setArgsTainted(true);
+            setDataTainted(true);
+
+            DPRINTF(DynInst,
+                    "[sn:%llu] STT: source reg idx %d tainted\n",
+                    seqNum, idx);
+        }
+
         return cpu->getReg(reg, threadNumber);
     }
 
@@ -1173,6 +1211,16 @@ class DynInst : public ExecContext, public RefCounted
         const PhysRegIdPtr reg = renamedSrcIdx(idx);
         if (reg->is(InvalidRegClass))
             return;
+
+        if (cpu->isRegTainted(reg)) {
+            setArgsTainted(true);
+            setDataTainted(true);
+
+            DPRINTF(DynInst,
+                    "[sn:%llu] STT: source reg idx %d tainted (blob)\n",
+                    seqNum, idx);
+        }
+
         cpu->getReg(reg, val, threadNumber);
     }
 
@@ -1191,8 +1239,21 @@ class DynInst : public ExecContext, public RefCounted
         const PhysRegIdPtr reg = renamedDestIdx(idx);
         if (reg->is(InvalidRegClass))
             return;
+
         cpu->setReg(reg, val, threadNumber);
         setResult(reg->regClass(), val);
+
+        bool out_tainted =
+            isArgsTainted() || isControlTainted() ||
+            isDataTainted() || isAddrTainted();
+
+        cpu->setRegTaint(reg, out_tainted);
+
+        if (out_tainted) {
+            DPRINTF(DynInst,
+                    "[sn:%llu] STT: tainted result written to dest reg idx %d\n",
+                    seqNum, idx);
+        }
     }
 
     void
@@ -1201,8 +1262,21 @@ class DynInst : public ExecContext, public RefCounted
         const PhysRegIdPtr reg = renamedDestIdx(idx);
         if (reg->is(InvalidRegClass))
             return;
+
         cpu->setReg(reg, val, threadNumber);
         setResult(reg->regClass(), val);
+
+        bool out_tainted =
+            isArgsTainted() || isControlTainted() ||
+            isDataTainted() || isAddrTainted();
+
+        cpu->setRegTaint(reg, out_tainted);
+
+        if (out_tainted) {
+            DPRINTF(DynInst,
+                    "[sn:%llu] STT: tainted blob result written to dest reg idx %d\n",
+                    seqNum, idx);
+        }
     }
 };
 

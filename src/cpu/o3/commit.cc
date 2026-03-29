@@ -950,7 +950,13 @@ Commit::commitInsts()
         DPRINTF(Commit,
                 "Trying to commit head instruction, [tid:%i] [sn:%llu]\n",
                 tid, head_inst->seqNum);
-
+        DPRINTF(Commit,
+                "STT test: [tid:%i] [sn:%llu] pre-commit args=%d ctrl=%d data=%d addr=%d\n",
+                tid, head_inst->seqNum,
+                head_inst->isArgsTainted(),
+                head_inst->isControlTainted(),
+                head_inst->isDataTainted(),
+                head_inst->isAddrTainted());
         // If the head instruction is squashed, it is ready to retire
         // (be removed from the ROB) at any time.
         if (head_inst->isSquashed()) {
@@ -1114,6 +1120,13 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
 
     ThreadID tid = head_inst->threadNumber;
 
+    DPRINTF(Commit,
+        "STT test: [tid:%i] [sn:%llu] commit sees argsTainted=%d control=%d data=%d addr=%d\n",
+        tid, head_inst->seqNum,
+        head_inst->isArgsTainted(),
+        head_inst->isControlTainted(),
+        head_inst->isDataTainted(),
+        head_inst->isAddrTainted());
     // If the instruction is not executed yet, then it will need extra
     // handling.  Signal backwards that it should be executed.
     if (!head_inst->isExecuted()) {
@@ -1273,6 +1286,17 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
     // Finally clear the head ROB entry.
     rob->retireHead(tid);
 
+    if (head_inst->isCondCtrl() &&
+    head_inst->isArgsTainted() &&
+    head_inst->isControlTainted()) {
+
+        toIEW->commitInfo[tid].clearControlSpecTaint = true;
+        wroteToTimeBuffer = true;
+
+        DPRINTF(Commit,
+                "[tid:%i] [sn:%llu] STT: committed tainted control; requesting fetch window clear\n",
+                tid, head_inst->seqNum);
+    }
     head_inst->commitTick = curTick() - head_inst->fetchTick;
 
     if (head_inst->traceData) {
