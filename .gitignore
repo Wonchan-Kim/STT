@@ -48,3 +48,21 @@ m5out/
 runs/
 *.out
 m5out/
+
+# ===== STT project outputs =====
+
+# experiment outputs
+results/
+
+# workload binaries (keep source only)
+workloads/*
+!workloads/*.c
+
+# large traces / datasets
+*.xz
+*.trace
+*.log
+
+# misc generated
+*.bin
+*.dump

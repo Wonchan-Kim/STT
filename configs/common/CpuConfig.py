@@ -75,3 +75,35 @@ def config_etrace(cpu_cls, cpu_list, options):
             " type or inherited from DerivO3CPU.",
             cpu_cls,
         )
+
+def config_scheme(cpu_cls, cpu_list, options):
+    if issubclass(cpu_cls, m5.objects.DerivO3CPU):
+        if options.needsTSO is None or options.threat_model is None:
+            fatal(
+                "Need to provide needsTSO and threat_model "
+                "to run simulation with DerivO3CPU"
+            )
+
+        print("**********")
+        print(
+            "info: Configure for DerivO3CPU. "
+            "needsTSO=%d; threat_model=%s; STT=%d; "
+            "implicit_channel=%d; moreTransmitInsts=%d; printROB=%d"
+            % (
+                options.needsTSO,
+                options.threat_model,
+                options.STT,
+                options.implicit_channel,
+                options.moreTransmitInsts,
+                options.ifPrintROB,
+            )
+        )
+        print("**********")
+
+        for cpu in cpu_list:
+            cpu.needsTSO = bool(options.needsTSO)
+            cpu.stt = bool(options.STT)
+            cpu.implicitChannel = bool(options.implicit_channel)
+
+    else:
+        print("not DerivO3CPU")
