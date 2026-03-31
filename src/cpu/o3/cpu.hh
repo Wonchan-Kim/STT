@@ -48,8 +48,8 @@
 #include <list>
 #include <queue>
 #include <set>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 #include "arch/generic/pcstate.hh"
 #include "base/statistics.hh"
@@ -101,7 +101,6 @@ class CPU : public BaseCPU
 
     friend class ThreadContext;
 
-  
   public:
     enum Status
     {
@@ -123,12 +122,13 @@ class CPU : public BaseCPU
 
     bool sttEnabled;
     std::unordered_map<PhysRegIdPtr, bool> regTaint;
+    std::unordered_map<InstSeqNum, std::vector<PhysRegIdPtr>>
+        instTaintedDestRegs;
     bool implicitChannelEnabled;
     bool explicitChannelEnabled;
     bool futuristicModelEnabled;
 
   private:
-
     /** The tick event used for scheduling CPU ticks. */
     EventFunctionWrapper tickEvent;
 
@@ -153,31 +153,8 @@ class CPU : public BaseCPU
             tickEvent.squash();
     }
 
-    /**
-     * Check if the pipeline has drained and signal drain done.
-     *
-     * This method checks if a drain has been requested and if the CPU
-     * has drained successfully (i.e., there are no instructions in
-     * the pipeline). If the CPU has drained, it deschedules the tick
-     * event and signals the drain manager.
-     *
-     * @return False if a drain hasn't been requested or the CPU
-     * hasn't drained, true otherwise.
-     */
     bool tryDrain();
-
-    /**
-     * Perform sanity checks after a drain.
-     *
-     * This method is called from drain() when it has determined that
-     * the CPU is fully drained when gem5 is compiled with the NDEBUG
-     * macro undefined. The intention of this method is to do more
-     * extensive tests than the isDrained() method to weed out any
-     * draining bugs.
-     */
     void drainSanityCheck() const;
-
-    /** Check if a system is in a drained state. */
     bool isCpuDrained() const;
 
   public:
@@ -185,7 +162,7 @@ class CPU : public BaseCPU
     CPU(const BaseO3CPUParams &params);
 
     ProbePointArg<PacketPtr> *ppInstAccessComplete;
-    ProbePointArg<std::pair<DynInstPtr, PacketPtr> > *ppDataAccessComplete;
+    ProbePointArg<std::pair<DynInstPtr, PacketPtr>> *ppDataAccessComplete;
 
     /** Register probe points. */
     void regProbePoints() override;
@@ -195,8 +172,16 @@ class CPU : public BaseCPU
     {
         mmu->demapPage(vaddr, asn);
     }
+
     bool isRegTainted(PhysRegIdPtr reg) const;
     void setRegTaint(PhysRegIdPtr reg, bool tainted);
+    void clearRegTaint(PhysRegIdPtr reg);
+
+    void recordInstTaintedDestReg(InstSeqNum seq_num, PhysRegIdPtr reg);
+    const std::vector<PhysRegIdPtr>*
+    getInstTaintedDestRegs(InstSeqNum seq_num) const;
+    void clearInstTaintedDestRegs(InstSeqNum seq_num);
+
     /** Ticks CPU, calling tick() on each stage, and checking the overall
      *  activity to see if the CPU should deschedule itself.
      */
@@ -344,7 +329,6 @@ class CPU : public BaseCPU
      * architected register first, then accesses that physical
      * register.
      */
-
     RegVal getArchReg(const RegId &reg, ThreadID tid);
     void getArchReg(const RegId &reg, void *val, ThreadID tid);
     void *getWritableArchReg(const RegId &reg, ThreadID tid);
@@ -378,7 +362,8 @@ class CPU : public BaseCPU
     void removeFrontInst(const DynInstPtr &inst);
 
     /** Remove all instructions that are not currently in the ROB.
-     *  There's also an option to not squash delay slot instructions.*/
+     *  There's also an option to not squash delay slot instructions.
+     */
     void removeInstsNotInROB(ThreadID tid);
 
     /** Remove all instructions younger than the given sequence number. */
@@ -423,7 +408,7 @@ class CPU : public BaseCPU
     /** The branch and PC address calculation stage. */
     BAC bac;
 
-    /** The Fetch taget queue. */
+    /** The Fetch target queue. */
     FTQ ftq;
 
     /** The fetch stage. */
@@ -575,13 +560,13 @@ class CPU : public BaseCPU
     /** The cycle that the CPU was last running, used for statistics. */
     Cycles lastRunningCycle;
 
-    /** The cycle that the CPU was last activated by a new thread*/
+    /** The cycle that the CPU was last activated by a new thread */
     Tick lastActivatedCycle;
 
     /** Mapping for system thread id to cpu id */
     std::map<ThreadID, unsigned> threadMap;
 
-    /** Available thread ids in the cpu*/
+    /** Available thread ids in the cpu */
     std::vector<ThreadID> tids;
 
     /** CPU pushRequest function, forwards request to LSQ. */
@@ -589,8 +574,7 @@ class CPU : public BaseCPU
     pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
                 unsigned int size, Addr addr, Request::Flags flags,
                 uint64_t *res, AtomicOpFunctorPtr amo_op = nullptr,
-                const std::vector<bool>& byte_enable=std::vector<bool>())
-
+                const std::vector<bool>& byte_enable = std::vector<bool>())
     {
         return iew.ldstQueue.pushRequest(inst, isLoad, data, size, addr,
                 flags, res, std::move(amo_op), byte_enable);
@@ -619,7 +603,8 @@ class CPU : public BaseCPU
         /** Stat for total number of cycles the CPU spends descheduled. */
         statistics::Scalar idleCycles;
         /** Stat for total number of cycles the CPU spends descheduled due to a
-         * quiesce operation or waiting for an interrupt. */
+         * quiesce operation or waiting for an interrupt.
+         */
         statistics::Scalar quiesceCycles;
     } cpuStats;
 

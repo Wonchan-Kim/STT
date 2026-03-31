@@ -791,6 +791,43 @@ CPU::drain()
     }
 }
 
+void
+CPU::recordInstTaintedDestReg(InstSeqNum seq_num, PhysRegIdPtr reg)
+{
+    if (!reg || reg->is(InvalidRegClass)) {
+        return;
+    }
+
+    auto &vec = instTaintedDestRegs[seq_num];
+    if (std::find(vec.begin(), vec.end(), reg) == vec.end()) {
+        vec.push_back(reg);
+    }
+
+    DPRINTF(O3CPU, "STT map record: sn=%llu size=%llu\n",
+            seq_num, (unsigned long long)vec.size());
+}
+
+const std::vector<PhysRegIdPtr>*
+CPU::getInstTaintedDestRegs(InstSeqNum seq_num) const
+{
+    auto it = instTaintedDestRegs.find(seq_num);
+
+    DPRINTF(O3CPU, "STT map lookup: sn=%llu found=%d\n",
+            seq_num, it != instTaintedDestRegs.end());
+
+    if (it == instTaintedDestRegs.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+void
+CPU::clearInstTaintedDestRegs(InstSeqNum seq_num)
+{
+    DPRINTF(O3CPU, "STT map clear: sn=%llu\n", seq_num);
+    instTaintedDestRegs.erase(seq_num);
+}
+
 bool
 CPU::tryDrain()
 {
@@ -1081,6 +1118,14 @@ CPU::setRegTaint(PhysRegIdPtr reg, bool tainted)
     regTaint[reg] = tainted;
 }
 void
+CPU::clearRegTaint(PhysRegIdPtr reg)
+{
+    if (!reg || reg->is(InvalidRegClass))
+        return;
+
+    regTaint[reg] = false;
+}
+void
 CPU::setReg(PhysRegIdPtr phys_reg, const void *val, ThreadID tid)
 {
     switch (phys_reg->classValue()) {
@@ -1292,12 +1337,30 @@ CPU::squashInstIt(const ListIt &instIt, ThreadID tid)
                 (*instIt)->seqNum,
                 (*instIt)->pcState());
 
-        // Mark it as squashed.
-        (*instIt)->setSquashed();
+        const auto *tainted_dests =
+            getInstTaintedDestRegs((*instIt)->seqNum);
 
-        // @todo: Formulate a consistent method for deleting
-        // instructions from the instruction list
-        // Remove the instruction from the list.
+        if (tainted_dests) {
+            for (size_t i = 0; i < tainted_dests->size(); i++) {
+                const PhysRegIdPtr dest_reg = (*tainted_dests)[i];
+
+                if (!dest_reg || dest_reg->is(InvalidRegClass)) {
+                    continue;
+                }
+
+                clearRegTaint(dest_reg);
+
+                DPRINTF(O3CPU,
+                        "[tid:%i] [sn:%lli] STT: cleared CPU-table tainted dest reg on squash for list idx %llu\n",
+                        (*instIt)->threadNumber,
+                        (*instIt)->seqNum,
+                        (unsigned long long)i);
+            }
+
+            clearInstTaintedDestRegs((*instIt)->seqNum);
+        }
+
+        (*instIt)->setSquashed();
         removeList.push(instIt);
     }
 }

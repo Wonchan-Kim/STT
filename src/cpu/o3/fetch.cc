@@ -1043,7 +1043,12 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
 
     // If we are already under a tainted speculative-control window,
     // taint younger instructions fetched in that window.
-        if (sttEnabled && controlSpecTaint[tid]) {
+    //
+    // Narrower policy:
+    // - Non-memory younger instructions become control-tainted only.
+    // - Memory younger instructions are treated as potential transmitters,
+    //   so they also receive args/address/data taint.
+    if (sttEnabled && controlSpecTaint[tid]) {
         instruction->setControlTainted(true);
 
         if (instruction->isMemRef()) {

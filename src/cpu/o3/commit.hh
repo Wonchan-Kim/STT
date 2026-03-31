@@ -345,7 +345,7 @@ class Commit
   private:
     /** Pointer to O3CPU. */
     CPU *cpu;
-
+    bool sttEnabled;
     /** Vector of all of the threads. */
     std::vector<ThreadState *> thread;
 

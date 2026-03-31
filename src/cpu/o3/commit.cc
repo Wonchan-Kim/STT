@@ -104,6 +104,7 @@ Commit::processTrapEvent(ThreadID tid)
 Commit::Commit(CPU *_cpu, const BaseO3CPUParams &params)
     : commitPolicy(params.smtCommitPolicy),
       cpu(_cpu),
+      sttEnabled(params.stt),
       iewToCommitDelay(params.iewToCommitDelay),
       commitToIEWDelay(params.commitToIEWDelay),
       renameToROBDelay(params.renameToROBDelay),
@@ -959,18 +960,44 @@ Commit::commitInsts()
                 head_inst->isAddrTainted());
         // If the head instruction is squashed, it is ready to retire
         // (be removed from the ROB) at any time.
-        if (head_inst->isSquashed()) {
+                if (head_inst->isSquashed()) {
 
             DPRINTF(Commit, "Retiring squashed instruction from "
                     "ROB.\n");
 
+            const auto *tainted_dests =
+                cpu->getInstTaintedDestRegs(head_inst->seqNum);
+
+            unsigned long long count =
+                tainted_dests ? (unsigned long long)tainted_dests->size() : 0;
+
+            DPRINTF(Commit,
+                    "[tid:%i] [sn:%llu] STT: squashed-inst tainted dest count = %llu\n",
+                    tid, head_inst->seqNum, count);
+
+            if (tainted_dests) {
+                for (size_t i = 0; i < tainted_dests->size(); i++) {
+                    const PhysRegIdPtr dest_reg = (*tainted_dests)[i];
+
+                    if (!dest_reg || dest_reg->is(InvalidRegClass)) {
+                        continue;
+                    }
+
+                    cpu->clearRegTaint(dest_reg);
+
+                    DPRINTF(Commit,
+                            "[tid:%i] [sn:%llu] STT: cleared CPU-table tainted dest reg while retiring squashed inst for list idx %llu\n",
+                            tid, head_inst->seqNum,
+                            (unsigned long long)i);
+                }
+
+                cpu->clearInstTaintedDestRegs(head_inst->seqNum);
+            }
+
             rob->retireHead(commit_thread);
 
             ++stats.commitSquashedInsts;
-            // Notify potential listeners that this instruction is squashed
             ppSquash->notify(head_inst);
-
-            // Record that the number of ROB entries has changed.
             changedROBNumEntries[tid] = true;
         // Inst at head of ROB cannot execute because the CPU
         // does not know how to (lack of FU). This is a misconfiguration,
@@ -1121,17 +1148,28 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
     ThreadID tid = head_inst->threadNumber;
 
     DPRINTF(Commit,
+        "[tid:%i] [sn:%llu] STT: ENTER commitHead\n",
+        tid, head_inst->seqNum);
+
+    DPRINTF(Commit,
         "STT test: [tid:%i] [sn:%llu] commit sees argsTainted=%d control=%d data=%d addr=%d\n",
         tid, head_inst->seqNum,
         head_inst->isArgsTainted(),
         head_inst->isControlTainted(),
         head_inst->isDataTainted(),
         head_inst->isAddrTainted());
+
+    DPRINTF(Commit,
+        "[tid:%i] [sn:%llu] STT: before isExecuted check, isExecuted=%d\n",
+        tid, head_inst->seqNum, head_inst->isExecuted());
+
     // If the instruction is not executed yet, then it will need extra
-    // handling.  Signal backwards that it should be executed.
+    // handling. Signal backwards that it should be executed.
     if (!head_inst->isExecuted()) {
-        // Make sure we are only trying to commit un-executed instructions we
-        // think are possible.
+        DPRINTF(Commit,
+            "[tid:%i] [sn:%llu] STT: early return because !isExecuted\n",
+            tid, head_inst->seqNum);
+
         assert(head_inst->isNonSpeculative() || head_inst->isStoreConditional()
                || head_inst->isReadBarrier() || head_inst->isWriteBarrier()
                || head_inst->isAtomic()
@@ -1170,24 +1208,24 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         return false;
     }
 
-    // Check if the instruction caused a fault.  If so, trap.
+    // Check if the instruction caused a fault. If so, trap.
     Fault inst_fault = head_inst->getFault();
 
+    DPRINTF(Commit,
+        "[tid:%i] [sn:%llu] STT: after isExecuted, inst_fault=%d\n",
+        tid, head_inst->seqNum, inst_fault != NoFault);
+
     // hardware transactional memory
-    // if a fault occurred within a HTM transaction
-    // ensure that the transaction aborts
+    // if a fault occurred within a HTM transaction ensure that the transaction aborts
     if (inst_fault != NoFault && head_inst->inHtmTransactionalState()) {
-        // There exists a generic HTM fault common to all ISAs
         if (!std::dynamic_pointer_cast<GenericHtmFailureFault>(inst_fault)) {
             DPRINTF(HtmCpu, "%s - fault (%s) encountered within transaction"
                             " - converting to GenericHtmFailureFault\n",
-            head_inst->staticInst->getName(), inst_fault->name());
+                    head_inst->staticInst->getName(), inst_fault->name());
             inst_fault = std::make_shared<GenericHtmFailureFault>(
                 head_inst->getHtmTransactionUid(),
                 HtmFailureFaultCause::EXCEPTION);
         }
-        // If this point is reached and the fault inherits from the HTM fault,
-        // then there is no need to raise a new fault
     }
 
     // Stores mark themselves as completed.
@@ -1196,6 +1234,10 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
     }
 
     if (inst_fault != NoFault) {
+        DPRINTF(Commit,
+            "[tid:%i] [sn:%llu] STT: early return because inst_fault\n",
+            tid, head_inst->seqNum);
+
         DPRINTF(Commit, "Inst [tid:%i] [sn:%llu] PC %s has a fault\n",
                 tid, head_inst->seqNum, head_inst->pcState());
 
@@ -1209,30 +1251,18 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
 
         head_inst->setCompleted();
 
-        // If instruction has faulted, let the checker execute it and
-        // check if it sees the same fault and control flow.
         if (cpu->checker) {
-            // Need to check the instruction before its fault is processed
             cpu->checker->verify(head_inst);
         }
 
         assert(!thread[tid]->noSquashFromTC);
 
-        // Mark that we're in state update mode so that the trap's
-        // execution doesn't generate extra squashes.
         thread[tid]->noSquashFromTC = true;
 
-        // Execute the trap.  Although it's slightly unrealistic in
-        // terms of timing (as it doesn't wait for the full timing of
-        // the trap event to complete before updating state), it's
-        // needed to update the state as soon as possible.  This
-        // prevents external agents from changing any specific state
-        // that the trap need.
         cpu->trap(inst_fault, tid,
                   head_inst->notAnInst() ? nullStaticInstPtr :
-                      head_inst->staticInst);
+                                           head_inst->staticInst);
 
-        // Exit state update mode to avoid accidental updating.
         thread[tid]->noSquashFromTC = false;
 
         commitStatus[tid] = TrapPending;
@@ -1240,12 +1270,10 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         DPRINTF(Commit,
             "[tid:%i] [sn:%llu] Committing instruction with fault\n",
             tid, head_inst->seqNum);
-        if (head_inst->traceData) {
-            // We ignore ReExecution "faults" here as they are not real
-            // (architectural) faults but signal flush/replays.
-            if (debug::ExecFaulting
-                && dynamic_cast<ReExec*>(inst_fault.get()) == nullptr) {
 
+        if (head_inst->traceData) {
+            if (debug::ExecFaulting &&
+                dynamic_cast<ReExec*>(inst_fault.get()) == nullptr) {
                 head_inst->traceData->setFaulting(true);
                 head_inst->traceData->setFetchSeq(head_inst->seqNum);
                 head_inst->traceData->setCPSeq(thread[tid]->numOp);
@@ -1255,7 +1283,6 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
             head_inst->traceData = NULL;
         }
 
-        // Generate trap squash event.
         generateTrapEvent(tid, inst_fault);
         return false;
     }
@@ -1278,6 +1305,43 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
                                  head_inst->renamedDestIdx(i));
     }
 
+    DPRINTF(Commit,
+        "[tid:%i] [sn:%llu] STT: commit head numDestRegs=%d sttEnabled=%d\n",
+        tid, head_inst->seqNum, head_inst->numDestRegs(), sttEnabled);
+
+    DPRINTF(Commit,
+        "[tid:%i] [sn:%llu] STT: about to enter STT cleanup block, sttEnabled=%d\n",
+        tid, head_inst->seqNum, sttEnabled);
+
+    const auto *tainted_dests =
+        cpu->getInstTaintedDestRegs(head_inst->seqNum);
+
+    unsigned long long count =
+        tainted_dests ? (unsigned long long)tainted_dests->size() : 0;
+
+    DPRINTF(Commit,
+            "[tid:%i] [sn:%llu] STT: CPU-table tainted dest count = %llu\n",
+            tid, head_inst->seqNum, count);
+
+    if (tainted_dests) {
+        for (size_t i = 0; i < tainted_dests->size(); i++) {
+            const PhysRegIdPtr dest_reg = (*tainted_dests)[i];
+
+            if (!dest_reg || dest_reg->is(InvalidRegClass)) {
+                continue;
+            }
+
+            cpu->clearRegTaint(dest_reg);
+
+            DPRINTF(Commit,
+                    "[tid:%i] [sn:%llu] STT: cleared CPU-table tainted dest reg at commit for list idx %llu\n",
+                    tid, head_inst->seqNum,
+                    (unsigned long long)i);
+        }
+
+        cpu->clearInstTaintedDestRegs(head_inst->seqNum);
+    }
+
     // hardware transactional memory
     // the HTM UID is purely for correctness and debugging purposes
     if (head_inst->isHtmStart())
@@ -1287,9 +1351,7 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
     rob->retireHead(tid);
 
     if (head_inst->isCondCtrl() &&
-    head_inst->isArgsTainted() &&
-    head_inst->isControlTainted()) {
-
+        head_inst->isControlTainted()) {
         toIEW->commitInfo[tid].clearControlSpecTaint = true;
         wroteToTimeBuffer = true;
 
@@ -1297,6 +1359,7 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
                 "[tid:%i] [sn:%llu] STT: committed tainted control; requesting fetch window clear\n",
                 tid, head_inst->seqNum);
     }
+
     head_inst->commitTick = curTick() - head_inst->fetchTick;
 
     if (head_inst->traceData) {
@@ -1307,20 +1370,18 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         head_inst->traceData = NULL;
     }
 
-    // If this was a store, record it for this cycle.
     if (head_inst->isStore() || head_inst->isAtomic())
         committedStores[tid] = true;
 
-    // Return true to indicate that we have committed an instruction.
     return true;
 }
+
 
 void
 Commit::getInsts()
 {
     DPRINTF(Commit, "Getting instructions from Rename stage.\n");
 
-    // Read any renamed instructions and place them into the ROB.
     int insts_to_process = std::min((int)renameWidth, fromRename->size);
 
     for (int inst_num = 0; inst_num < insts_to_process; ++inst_num) {

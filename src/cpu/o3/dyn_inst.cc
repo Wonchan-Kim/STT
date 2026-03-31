@@ -43,6 +43,9 @@
 #include <algorithm>
 
 #include "base/intmath.hh"
+#include "cpu/o3/cpu.hh"
+#include "cpu/o3/inst_queue.hh"
+#include "cpu/o3/thread_state.hh"
 #include "debug/DynInst.hh"
 #include "debug/IQ.hh"
 #include "debug/O3PipeView.hh"
@@ -89,7 +92,6 @@ DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &static_inst,
 #ifdef GEM5_DEBUG
     cpu->snList.insert(seqNum);
 #endif
-
 }
 
 DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &static_inst,
@@ -106,41 +108,12 @@ DynInst::DynInst(const Arrays &arrays, const StaticInstPtr &_staticInst,
     : DynInst(arrays, _staticInst, _macroop, 0, nullptr)
 {}
 
-/*
- * This custom "new" operator uses the default "new" operator to allocate space
- * for a DynInst, but also pads out the number of bytes to make room for some
- * extra structures the DynInst needs. We save time and improve performance by
- * only going to the heap once to get space for all these structures.
- *
- * When a DynInst is allocated with new, the compiler will call this "new"
- * operator with "count" set to the number of bytes it needs to store the
- * DynInst. We ultimately call into the default new operator to get those
- * bytes, but before we do, we pad out "count" so that there will be extra
- * space for some structures the DynInst needs. We take into account both the
- * absolute size of these structures, and also what alignment they need.
- *
- * Once we've gotten a buffer large enough to hold the DynInst itself and these
- * extra structures, we construct the extra bits using placement new. This
- * constructs the structures in place in the space we created for them.
- *
- * Next, we return the buffer as the result of our operator. The compiler takes
- * that buffer and constructs the DynInst in the beginning of it using the
- * DynInst constructor.
- *
- * To avoid having to calculate where these extra structures are twice, once
- * when making room for them and initializing them, and then once again in the
- * DynInst constructor, we also pass in a structure called "arrays" which holds
- * pointers to them. The fields of "arrays" are initialized in this operator,
- * and are then consumed in the DynInst constructor.
- */
 void *
 DynInst::operator new(size_t count, Arrays &arrays)
 {
-    // Convenience variables for brevity.
     const auto num_dests = arrays.numDests;
     const auto num_srcs = arrays.numSrcs;
 
-    // Figure out where everything will go.
     uintptr_t inst = 0;
     size_t inst_size = count;
 
@@ -164,20 +137,16 @@ DynInst::operator new(size_t count, Arrays &arrays)
     size_t ready_src_idx_size =
         sizeof(*arrays.readySrcIdx) * ((num_srcs + 7) / 8);
 
-    // Figure out how much space we need in total.
     size_t total_size = ready_src_idx + ready_src_idx_size;
 
-    // Actually allocate it.
     uint8_t *buf = (uint8_t *)::operator new(total_size);
 
-    // Fill in "arrays" with pointers to all the arrays.
     arrays.flatDestIdx = (RegId *)(buf + flat_dest_idx);
     arrays.destIdx = (PhysRegIdPtr *)(buf + dest_idx);
     arrays.prevDestIdx = (PhysRegIdPtr *)(buf + prev_dest_idx);
     arrays.srcIdx = (PhysRegIdPtr *)(buf + src_idx);
     arrays.readySrcIdx = (uint8_t *)(buf + ready_src_idx);
 
-    // Initialize all the extra components.
     new (arrays.flatDestIdx) RegId[num_dests];
     new (arrays.destIdx) PhysRegIdPtr[num_dests];
     new (arrays.prevDestIdx) PhysRegIdPtr[num_dests];
@@ -187,9 +156,6 @@ DynInst::operator new(size_t count, Arrays &arrays)
     return buf;
 }
 
-// Because of the custom "new" operator that allocates more bytes than the
-// size of the DynInst object, AddressSanitizer throw new-delete-type-mismatch.
-// Adding a custom delete function is enough to shut down this false positive
 void
 DynInst::operator delete(void *ptr)
 {
@@ -198,13 +164,6 @@ DynInst::operator delete(void *ptr)
 
 DynInst::~DynInst()
 {
-    /*
-     * The buffer this DynInst occupies also holds some of the structures it
-     * points to. We need to call their destructors manually to make sure that
-     * they're cleaned up appropriately, but we don't need to free their memory
-     * explicitly since that's part of the DynInst's buffer and is already
-     * going to be freed as part of deleting the DynInst.
-     */
     for (int i = 0; i < _numDests; i++) {
         _flatDestIdx[i].~RegId();
         _destIdx[i].~PhysRegIdPtr();
@@ -220,11 +179,8 @@ DynInst::~DynInst()
 #if TRACING_ON
     if (debug::O3PipeView) {
         Tick fetch = fetchTick;
-        // fetchTick can be -1 if the instruction fetched outside the trace
-        // window.
         if (fetch != -1) {
             Tick val;
-            // Print info needed by the pipeline activity viewer.
             DPRINTFR(O3PipeView, "O3PipeView:fetch:%llu:0x%08llx:%d:%llu:%s\n",
                      fetch,
                      pcState().instAddr(),
@@ -265,8 +221,7 @@ DynInst::~DynInst()
 #ifdef GEM5_DEBUG
     cpu->snList.erase(seqNum);
 #endif
-};
-
+}
 
 #ifdef GEM5_DEBUG
 void
@@ -318,7 +273,6 @@ DynInst::markSrcRegReady(RegIndex src_idx)
     markSrcRegReady();
 }
 
-
 void
 DynInst::setSquashed()
 {
@@ -327,12 +281,6 @@ DynInst::setSquashed()
     if (!isPinnedRegsRenamed() || isPinnedRegsSquashDone())
         return;
 
-    // This inst has been renamed already so it may go through rename
-    // again (e.g. if the squash is due to memory access order violation).
-    // Reset the write counters for all pinned destination register to ensure
-    // that they are in a consistent state for a possible re-rename. This also
-    // ensures that dest regs will be pinned to the same phys register if
-    // re-rename happens.
     for (int idx = 0; idx < numDestRegs(); idx++) {
         PhysRegIdPtr phys_dest_reg = renamedDestIdx(idx);
         if (phys_dest_reg->isPinned()) {
@@ -344,13 +292,15 @@ DynInst::setSquashed()
     setPinnedRegsSquashDone();
 }
 
+BaseCPU *
+DynInst::getCpuPtr()
+{
+    return static_cast<BaseCPU *>(cpu);
+}
+
 Fault
 DynInst::execute()
 {
-    // @todo: Pretty convoluted way to avoid squashing from happening
-    // when using the TC during an instruction's execution
-    // (specifically for instructions that have side-effects that use
-    // the TC).  Fix this.
     bool no_squash_from_TC = thread->noSquashFromTC;
     thread->noSquashFromTC = true;
 
@@ -364,10 +314,6 @@ DynInst::execute()
 Fault
 DynInst::initiateAcc()
 {
-    // @todo: Pretty convoluted way to avoid squashing from happening
-    // when using the TC during an instruction's execution
-    // (specifically for instructions that have side-effects that use
-    // the TC).  Fix this.
     bool no_squash_from_TC = thread->noSquashFromTC;
     thread->noSquashFromTC = true;
 
@@ -381,10 +327,6 @@ DynInst::initiateAcc()
 Fault
 DynInst::completeAcc(PacketPtr pkt)
 {
-    // @todo: Pretty convoluted way to avoid squashing from happening
-    // when using the TC during an instruction's execution
-    // (specifically for instructions that have side-effects that use
-    // the TC).  Fix this.
     bool no_squash_from_TC = thread->noSquashFromTC;
     thread->noSquashFromTC = true;
 
@@ -414,8 +356,7 @@ DynInst::initiateMemRead(Addr addr, unsigned size, Request::Flags flags,
     assert(byte_enable.size() == size);
     return cpu->pushRequest(
         dynamic_cast<DynInstPtr::PtrType>(this),
-        /* ld */ true, nullptr, size, addr, flags, nullptr, nullptr,
-        byte_enable);
+        true, nullptr, size, addr, flags, nullptr, nullptr, byte_enable);
 }
 
 Fault
@@ -424,7 +365,7 @@ DynInst::initiateMemMgmtCmd(Request::Flags flags)
     const unsigned int size = 8;
     return cpu->pushRequest(
             dynamic_cast<DynInstPtr::PtrType>(this),
-            /* ld */ true, nullptr, size, 0x0ul, flags, nullptr, nullptr,
+            true, nullptr, size, 0x0ul, flags, nullptr, nullptr,
             std::vector<bool>(size, true));
 }
 
@@ -436,23 +377,277 @@ DynInst::writeMem(uint8_t *data, unsigned size, Addr addr,
     assert(byte_enable.size() == size);
     return cpu->pushRequest(
         dynamic_cast<DynInstPtr::PtrType>(this),
-        /* st */ false, data, size, addr, flags, res, nullptr,
-        byte_enable);
+        false, data, size, addr, flags, res, nullptr, byte_enable);
 }
 
 Fault
 DynInst::initiateMemAMO(Addr addr, unsigned size, Request::Flags flags,
                               AtomicOpFunctorPtr amo_op)
 {
-    // atomic memory instructions do not have data to be written to memory yet
-    // since the atomic operations will be executed directly in cache/memory.
-    // Therefore, its `data` field is nullptr.
-    // Atomic memory requests need to carry their `amo_op` fields to cache/
-    // memory
     return cpu->pushRequest(
             dynamic_cast<DynInstPtr::PtrType>(this),
-            /* atomic */ false, nullptr, size, addr, flags, nullptr,
+            false, nullptr, size, addr, flags, nullptr,
             std::move(amo_op), std::vector<bool>(size, true));
+}
+
+void
+DynInst::demapPage(Addr vaddr, uint64_t asn)
+{
+    cpu->demapPage(vaddr, asn);
+}
+
+int
+DynInst::cpuId() const
+{
+    return cpu->cpuId();
+}
+
+uint32_t
+DynInst::socketId() const
+{
+    return cpu->socketId();
+}
+
+RequestorID
+DynInst::requestorId() const
+{
+    return cpu->dataRequestorId();
+}
+
+ContextID
+DynInst::contextId() const
+{
+    return thread->contextId();
+}
+
+void
+DynInst::clearInIQ()
+{
+    assert(iq);
+    status.reset(IqEntry);
+    iq->remove(this);
+    iq = nullptr;
+}
+
+gem5::ThreadContext *
+DynInst::tcBase() const
+{
+    return thread->getTC();
+}
+
+unsigned int
+DynInst::readStCondFailures() const
+{
+    return thread->storeCondFailures;
+}
+
+void
+DynInst::setStCondFailures(unsigned int sc_failures)
+{
+    thread->storeCondFailures = sc_failures;
+}
+
+void
+DynInst::armMonitor(Addr address)
+{
+    cpu->armMonitor(threadNumber, address);
+}
+
+bool
+DynInst::mwait(PacketPtr pkt)
+{
+    return cpu->mwait(threadNumber, pkt);
+}
+
+void
+DynInst::mwaitAtomic(gem5::ThreadContext *tc)
+{
+    cpu->mwaitAtomic(threadNumber, tc, cpu->mmu);
+}
+
+AddressMonitor *
+DynInst::getAddrMonitor()
+{
+    return cpu->getCpuAddrMonitor(threadNumber);
+}
+
+RegVal
+DynInst::readMiscReg(int misc_reg)
+{
+    return cpu->readMiscReg(misc_reg, threadNumber);
+}
+
+void
+DynInst::setMiscReg(int misc_reg, RegVal val)
+{
+    for (auto &idx: _destMiscRegIdx) {
+        if (idx == misc_reg)
+            return;
+    }
+
+    _destMiscRegIdx.push_back(misc_reg);
+    _destMiscRegVal.push_back(val);
+}
+
+RegVal
+DynInst::readMiscRegOperand(const StaticInst *si, int idx)
+{
+    const RegId& reg = si->srcRegIdx(idx);
+    assert(reg.is(MiscRegClass));
+    return cpu->readMiscReg(reg.index(), threadNumber);
+}
+
+void
+DynInst::setMiscRegOperand(const StaticInst *si, int idx, RegVal val)
+{
+    const RegId& reg = si->destRegIdx(idx);
+    assert(reg.is(MiscRegClass));
+    setMiscReg(reg.index(), val);
+
+    if (!reg.regClass().isSerializing(reg)) {
+        assert(isNonSpeculative());
+
+        bool no_squash_from_TC = thread->noSquashFromTC;
+        thread->noSquashFromTC = true;
+        cpu->setMiscReg(reg.index(), val, threadNumber);
+        thread->noSquashFromTC = no_squash_from_TC;
+    }
+}
+
+void
+DynInst::updateMiscRegs()
+{
+    bool no_squash_from_TC = thread->noSquashFromTC;
+    thread->noSquashFromTC = true;
+
+    for (int i = 0; i < _destMiscRegIdx.size(); i++)
+        cpu->setMiscReg(
+            _destMiscRegIdx[i], _destMiscRegVal[i], threadNumber);
+
+    thread->noSquashFromTC = no_squash_from_TC;
+}
+
+void
+DynInst::forwardOldRegs()
+{
+    for (int idx = 0; idx < numDestRegs(); idx++) {
+        PhysRegIdPtr prev_phys_reg = prevDestIdx(idx);
+        const RegId& original_dest_reg = staticInst->destRegIdx(idx);
+        const auto bytes = original_dest_reg.regClass().regBytes();
+
+        if (!original_dest_reg.isRenameable())
+            continue;
+
+        if (bytes == sizeof(RegVal)) {
+            setRegOperand(staticInst.get(), idx,
+                    cpu->getReg(prev_phys_reg, threadNumber));
+        } else {
+            const size_t size = original_dest_reg.regClass().regBytes();
+            auto val = std::make_unique<uint8_t[]>(size);
+            cpu->getReg(prev_phys_reg, val.get(), threadNumber);
+            setRegOperand(staticInst.get(), idx, val.get());
+        }
+    }
+}
+
+RegVal
+DynInst::getRegOperand(const StaticInst *si, int idx)
+{
+    const PhysRegIdPtr reg = renamedSrcIdx(idx);
+    if (reg->is(InvalidRegClass))
+        return 0;
+
+    if (cpu->isRegTainted(reg)) {
+        setArgsTainted(true);
+        setDataTainted(true);
+
+        DPRINTF(DynInst,
+                "[sn:%llu] STT: source reg idx %d tainted\n",
+                seqNum, idx);
+    }
+
+    return cpu->getReg(reg, threadNumber);
+}
+
+void
+DynInst::getRegOperand(const StaticInst *si, int idx, void *val)
+{
+    const PhysRegIdPtr reg = renamedSrcIdx(idx);
+    if (reg->is(InvalidRegClass))
+        return;
+
+    if (cpu->isRegTainted(reg)) {
+        setArgsTainted(true);
+        setDataTainted(true);
+
+        DPRINTF(DynInst,
+                "[sn:%llu] STT: source reg idx %d tainted (blob)\n",
+                seqNum, idx);
+    }
+
+    cpu->getReg(reg, val, threadNumber);
+}
+
+void *
+DynInst::getWritableRegOperand(const StaticInst *si, int idx)
+{
+    return cpu->getWritableReg(renamedDestIdx(idx), threadNumber);
+}
+
+void
+DynInst::setRegOperand(const StaticInst *si, int idx, RegVal val)
+{
+    const PhysRegIdPtr reg = renamedDestIdx(idx);
+    if (reg->is(InvalidRegClass))
+        return;
+
+    cpu->setReg(reg, val, threadNumber);
+    setResult(reg->regClass(), val);
+
+    bool out_tainted =
+        isArgsTainted() || isControlTainted() ||
+        isDataTainted() || isAddrTainted();
+
+    cpu->setRegTaint(reg, out_tainted);
+
+    if (out_tainted) {
+        cpu->recordInstTaintedDestReg(seqNum, reg);
+
+        DPRINTF(DynInst,
+                "[sn:%llu] STT: recorded tainted dest reg in CPU table\n",
+                seqNum);
+        DPRINTF(DynInst,
+                "[sn:%llu] STT: tainted result written to dest reg idx %d\n",
+                seqNum, idx);
+    }
+}
+
+void
+DynInst::setRegOperand(const StaticInst *si, int idx, const void *val)
+{
+    const PhysRegIdPtr reg = renamedDestIdx(idx);
+    if (reg->is(InvalidRegClass))
+        return;
+
+    cpu->setReg(reg, val, threadNumber);
+    setResult(reg->regClass(), val);
+
+    bool out_tainted =
+        isArgsTainted() || isControlTainted() ||
+        isDataTainted() || isAddrTainted();
+
+    cpu->setRegTaint(reg, out_tainted);
+
+    if (out_tainted) {
+        cpu->recordInstTaintedDestReg(seqNum, reg);
+
+        DPRINTF(DynInst,
+                "[sn:%llu] STT: recorded tainted dest reg in CPU table\n",
+                seqNum);
+        DPRINTF(DynInst,
+                "[sn:%llu] STT: tainted blob result written to dest reg idx %d\n",
+                seqNum, idx);
+    }
 }
 
 } // namespace o3
