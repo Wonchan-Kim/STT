@@ -134,13 +134,6 @@ parser = argparse.ArgumentParser()
 Options.addCommonOptions(parser)
 Options.addSEOptions(parser)
 
-parser.add_argument("--needsTSO", type=int, default=None)
-parser.add_argument("--threat_model", type=str, default=None)
-parser.add_argument("--STT", type=int, default=0)
-parser.add_argument("--implicit_channel", type=int, default=0)
-parser.add_argument("--moreTransmitInsts", type=int, default=0)
-parser.add_argument("--ifPrintROB", type=int, default=0)
-
 if "--ruby" in sys.argv:
     Ruby.define_options(parser)
 
@@ -228,14 +221,10 @@ if args.elastic_trace_en:
 for cpu in system.cpu:
     cpu.clk_domain = system.cpu_clk_domain
 
-# Configure STT / simulation scheme for O3 CPUs
-if issubclass(CPUClass, DerivO3CPU):
-    CpuConfig.config_scheme(CPUClass, system.cpu, args)
-
-# for cpu in system.cpu:
-    # cpu.stt = True
-    # cpu.implicitChannel = True
-    # print("STT config:", cpu.stt, cpu.implicitChannel)
+for cpu in system.cpu:
+    cpu.stt = True
+    cpu.implicitChannel = True
+    print("STT config:", cpu.stt, cpu.implicitChannel)
 
 if ObjectList.is_kvm_cpu(CPUClass) or ObjectList.is_kvm_cpu(FutureClass):
     if buildEnv["USE_X86_ISA"]:
