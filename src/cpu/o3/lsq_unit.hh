@@ -90,11 +90,17 @@ class LSQUnit
   private:
     bool sttEnabled;
     bool implicitChannelEnabled;
+    bool shouldShadowLoad(const DynInstPtr &inst, Fault fault) const;    
+    bool shouldShadowStore(const DynInstPtr &inst) const;
     
   public:
     static constexpr auto MaxDataBytes = MaxVecRegLenInBytes;
-
     using LSQRequest = LSQ::LSQRequest;
+
+  private:     
+    void completeShadowLoad(const DynInstPtr &inst, LSQRequest *request);
+
+
   private:
     class LSQEntry
     {
@@ -522,6 +528,8 @@ class LSQUnit
 
     /** Flag for memory model. */
     bool needsTSO;
+
+    
 
   protected:
     // Will also need how many read/write ports the Dcache has.  Or keep track

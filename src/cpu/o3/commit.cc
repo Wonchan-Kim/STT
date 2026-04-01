@@ -421,7 +421,6 @@ Commit::resetHtmStartsStops(ThreadID tid)
     }
 }
 
-
 void
 Commit::updateStatus()
 {
@@ -656,7 +655,6 @@ Commit::tick()
         DPRINTF(Commit, "[tid:%i] ROB has %d insts & %d free entries.\n",
                 tid, rob->countInsts(tid), rob->numFreeEntries(tid));
     }
-
 
     if (wroteToTimeBuffer) {
         DPRINTF(Activity, "Activity This Cycle.\n");
@@ -951,29 +949,16 @@ Commit::commitInsts()
         DPRINTF(Commit,
                 "Trying to commit head instruction, [tid:%i] [sn:%llu]\n",
                 tid, head_inst->seqNum);
-        DPRINTF(Commit,
-                "STT test: [tid:%i] [sn:%llu] pre-commit args=%d ctrl=%d data=%d addr=%d\n",
-                tid, head_inst->seqNum,
-                head_inst->isArgsTainted(),
-                head_inst->isControlTainted(),
-                head_inst->isDataTainted(),
-                head_inst->isAddrTainted());
+
         // If the head instruction is squashed, it is ready to retire
         // (be removed from the ROB) at any time.
-                if (head_inst->isSquashed()) {
+        if (head_inst->isSquashed()) {
 
             DPRINTF(Commit, "Retiring squashed instruction from "
                     "ROB.\n");
 
             const auto *tainted_dests =
                 cpu->getInstTaintedDestRegs(head_inst->seqNum);
-
-            unsigned long long count =
-                tainted_dests ? (unsigned long long)tainted_dests->size() : 0;
-
-            DPRINTF(Commit,
-                    "[tid:%i] [sn:%llu] STT: squashed-inst tainted dest count = %llu\n",
-                    tid, head_inst->seqNum, count);
 
             if (tainted_dests) {
                 for (size_t i = 0; i < tainted_dests->size(); i++) {
@@ -1147,29 +1132,9 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
 
     ThreadID tid = head_inst->threadNumber;
 
-    DPRINTF(Commit,
-        "[tid:%i] [sn:%llu] STT: ENTER commitHead\n",
-        tid, head_inst->seqNum);
-
-    DPRINTF(Commit,
-        "STT test: [tid:%i] [sn:%llu] commit sees argsTainted=%d control=%d data=%d addr=%d\n",
-        tid, head_inst->seqNum,
-        head_inst->isArgsTainted(),
-        head_inst->isControlTainted(),
-        head_inst->isDataTainted(),
-        head_inst->isAddrTainted());
-
-    DPRINTF(Commit,
-        "[tid:%i] [sn:%llu] STT: before isExecuted check, isExecuted=%d\n",
-        tid, head_inst->seqNum, head_inst->isExecuted());
-
     // If the instruction is not executed yet, then it will need extra
     // handling. Signal backwards that it should be executed.
     if (!head_inst->isExecuted()) {
-        DPRINTF(Commit,
-            "[tid:%i] [sn:%llu] STT: early return because !isExecuted\n",
-            tid, head_inst->seqNum);
-
         assert(head_inst->isNonSpeculative() || head_inst->isStoreConditional()
                || head_inst->isReadBarrier() || head_inst->isWriteBarrier()
                || head_inst->isAtomic()
@@ -1211,10 +1176,6 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
     // Check if the instruction caused a fault. If so, trap.
     Fault inst_fault = head_inst->getFault();
 
-    DPRINTF(Commit,
-        "[tid:%i] [sn:%llu] STT: after isExecuted, inst_fault=%d\n",
-        tid, head_inst->seqNum, inst_fault != NoFault);
-
     // hardware transactional memory
     // if a fault occurred within a HTM transaction ensure that the transaction aborts
     if (inst_fault != NoFault && head_inst->inHtmTransactionalState()) {
@@ -1234,10 +1195,6 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
     }
 
     if (inst_fault != NoFault) {
-        DPRINTF(Commit,
-            "[tid:%i] [sn:%llu] STT: early return because inst_fault\n",
-            tid, head_inst->seqNum);
-
         DPRINTF(Commit, "Inst [tid:%i] [sn:%llu] PC %s has a fault\n",
                 tid, head_inst->seqNum, head_inst->pcState());
 
@@ -1305,23 +1262,8 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
                                  head_inst->renamedDestIdx(i));
     }
 
-    DPRINTF(Commit,
-        "[tid:%i] [sn:%llu] STT: commit head numDestRegs=%d sttEnabled=%d\n",
-        tid, head_inst->seqNum, head_inst->numDestRegs(), sttEnabled);
-
-    DPRINTF(Commit,
-        "[tid:%i] [sn:%llu] STT: about to enter STT cleanup block, sttEnabled=%d\n",
-        tid, head_inst->seqNum, sttEnabled);
-
     const auto *tainted_dests =
         cpu->getInstTaintedDestRegs(head_inst->seqNum);
-
-    unsigned long long count =
-        tainted_dests ? (unsigned long long)tainted_dests->size() : 0;
-
-    DPRINTF(Commit,
-            "[tid:%i] [sn:%llu] STT: CPU-table tainted dest count = %llu\n",
-            tid, head_inst->seqNum, count);
 
     if (tainted_dests) {
         for (size_t i = 0; i < tainted_dests->size(); i++) {
@@ -1375,7 +1317,6 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
 
     return true;
 }
-
 
 void
 Commit::getInsts()

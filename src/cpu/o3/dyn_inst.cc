@@ -41,7 +41,7 @@
 #include "cpu/o3/dyn_inst.hh"
 
 #include <algorithm>
-
+#include "debug/O3CPU.hh"
 #include "base/intmath.hh"
 #include "cpu/o3/cpu.hh"
 #include "cpu/o3/inst_queue.hh"
@@ -423,12 +423,16 @@ DynInst::contextId() const
 void
 DynInst::clearInIQ()
 {
-    assert(iq);
-    status.reset(IqEntry);
-    iq->remove(this);
+    DPRINTF(O3CPU,
+            "STT/debug: clearInIQ called on [sn:%llu] iq_before_null=%d\n",
+            seqNum, iq == nullptr);
+
+    if (!iq) {
+        return;
+    }
+
     iq = nullptr;
 }
-
 gem5::ThreadContext *
 DynInst::tcBase() const
 {

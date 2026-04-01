@@ -359,7 +359,7 @@ Fetch::resetStage()
         fetchBufferValid[tid] = false;
 
         fetchQueue[tid].clear();
-                
+
         controlSpecTaint[tid] = false;
         controlSpecTaintRoot[tid] = 0;
         priorityList.push_back(tid);
@@ -1055,14 +1055,6 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
             instruction->setArgsTainted(true);
             instruction->setAddrTainted(true);
             instruction->setDataTainted(true);
-
-            DPRINTF(Fetch,
-                    "[tid:%i] [sn:%llu] STT: younger mem inst tainted under control-spec window (root sn:%llu)\n",
-                    tid, instruction->seqNum, controlSpecTaintRoot[tid]);
-        } else {
-            DPRINTF(Fetch,
-                    "[tid:%i] [sn:%llu] STT: younger non-mem inst control-tainted under control-spec window (root sn:%llu)\n",
-                    tid, instruction->seqNum, controlSpecTaintRoot[tid]);
         }
     }
 
@@ -1098,17 +1090,6 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
 
     // Add instruction to the CPU's list of instructions.
     instruction->setInstListIt(cpu->addInst(instruction));
-
-    if (instruction->isArgsTainted() || instruction->isControlTainted() ||
-        instruction->isDataTainted() || instruction->isAddrTainted()) {
-        DPRINTF(Fetch,
-                "[tid:%i] [sn:%llu] STT: after addInst args=%d ctrl=%d data=%d addr=%d\n",
-                tid, instruction->seqNum,
-                instruction->isArgsTainted(),
-                instruction->isControlTainted(),
-                instruction->isDataTainted(),
-                instruction->isAddrTainted());
-    }
 
     // Write the instruction to the first slot in the queue
     // that heads to decode.
@@ -1355,8 +1336,6 @@ Fetch::fetch(bool &status_change)
 
             // If we're branching after this instruction, quit fetching
             // from the same block.
-                        // If we're branching after this instruction, quit fetching
-            // from the same block.
             predictedBranch |= this_pc.branching();
 
             bool suppressImplicitBranchPred =
@@ -1386,7 +1365,7 @@ Fetch::fetch(bool &status_change)
                         "[tid:%i] [sn:%llu] STT: tainted conditional control processed, predictedBranch=%d nextPC=%s\n",
                         tid, instruction->seqNum, predictedBranch, *next_pc);
             }
-            ///
+
             if (instruction->isControl()) {
                 cpu->fetchStats[tid]->numBranches++;
             }

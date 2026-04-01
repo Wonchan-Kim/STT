@@ -600,9 +600,6 @@ LSQUnit::checkViolations(typename LoadQueue::iterator& loadIt,
     return NoFault;
 }
 
-
-
-
 Fault
 LSQUnit::executeLoad(const DynInstPtr &inst)
 {
@@ -620,6 +617,17 @@ LSQUnit::executeLoad(const DynInstPtr &inst)
     }
 
     load_fault = inst->initiateAcc();
+
+    bool sttShadowLoad = shouldShadowLoad(inst, load_fault);
+
+    if (load_fault == NoFault && sttShadowLoad) {
+        DPRINTF(LSQUnit,
+                "STT: executeLoad normal-path shadow completion [sn:%lli]\n",
+                inst->seqNum);
+
+        completeShadowLoad(inst, inst->savedRequest);
+        return NoFault;
+    }
 
     if (load_fault == NoFault && !inst->readMemAccPredicate()) {
         assert(inst->readPredicate());
@@ -647,10 +655,15 @@ LSQUnit::executeLoad(const DynInstPtr &inst)
     // If the instruction faulted or predicated false, then we need to send it
     // along to commit without the instruction completing.
     if (load_fault != NoFault || !inst->readPredicate()) {
-        // Send this instruction to commit, also make sure iew stage
-        // realizes there is activity.  Mark it as executed unless it
-        // is a strictly ordered load that needs to hit the head of
-        // commit.
+        if (sttShadowLoad) {
+            DPRINTF(LSQUnit,
+                    "STT: executeLoad fault-path shadow completion [sn:%lli] fault=%s\n",
+                    inst->seqNum, load_fault->name());
+
+            completeShadowLoad(inst, inst->savedRequest);
+            return NoFault;
+        }
+
         if (!inst->readPredicate())
             inst->forwardOldRegs();
         DPRINTF(LSQUnit, "Load [sn:%lli] not executed from %s\n",
@@ -689,14 +702,72 @@ LSQUnit::executeStore(const DynInstPtr &store_inst)
     assert(!store_inst->isSquashed());
 
     // Check the recently completed loads to see if any match this store's
-    // address.  If so, then we have a memory ordering violation.
+    // address. If so, then we have a memory ordering violation.
     typename LoadQueue::iterator loadIt = store_inst->lqIt;
 
     Fault store_fault = store_inst->initiateAcc();
 
+    DPRINTF(LSQUnit,
+            "STT: executeStore check [sn:%lli] PC %s "
+            "args=%d ctrl=%d data=%d addr=%d isolate=%d fault=%s\n",
+            store_inst->seqNum,
+            store_inst->pcState(),
+            store_inst->isArgsTainted(),
+            store_inst->isControlTainted(),
+            store_inst->isDataTainted(),
+            store_inst->isAddrTainted(),
+            shouldShadowStore(store_inst),
+            store_fault == NoFault ? "NoFault" : store_fault->name());
+
+    bool sttShadowStore = shouldShadowStore(store_inst);
+
+    // Shadow speculative tainted store:
+    // do not let it perform a real memory writeback, but let it retire cleanly.
+    if (store_fault == NoFault && sttShadowStore) {
+        DPRINTF(LSQUnit,
+                "STT: executeStore shadow-candidate [sn:%lli] PC %s\n",
+                store_inst->seqNum, store_inst->pcState());
+
+        // If translation is still delayed, do not finalize anything yet.
+        if (store_inst->isTranslationDelayed()) {
+            DPRINTF(LSQUnit,
+                    "STT: executeStore shadow-candidate delayed by translation "
+                    "[sn:%lli]\n",
+                    store_inst->seqNum);
+            return store_fault;
+        }
+
+        // Mark this store as a shadowed/suppressed store.
+        store_inst->setExecuted();
+        store_inst->setCanCommit();
+        store_inst->setCompleted();
+        store_inst->setExplicitShadowedStore(true);
+
+        // Prevent real store writeback by making it a zero-size committed store.
+        // writebackStores() will then just completeStore(...) it without
+        // sending anything to memory.
+        if (storeQueue[store_idx].size() != 0) {
+            storeQueue[store_idx].size() = 0;
+            if (!storeQueue[store_idx].canWB()) {
+                storeQueue[store_idx].canWB() = true;
+                ++storesToWB;
+            }
+        }
+
+        DPRINTF(LSQUnit,
+                "STT: shadow store converted to zero-size committed store "
+                "[sn:%lli] idx:%i\n",
+                store_inst->seqNum, store_idx);
+
+        iewStage->instToCommit(store_inst);
+        iewStage->activityThisCycle();
+        return NoFault;
+    }
+
     if (store_inst->isTranslationDelayed() &&
-        store_fault == NoFault)
+        store_fault == NoFault) {
         return store_fault;
+    }
 
     if (!store_inst->readPredicate()) {
         DPRINTF(LSQUnit, "Store [sn:%lli] not executed from predication\n",
@@ -706,7 +777,7 @@ LSQUnit::executeStore(const DynInstPtr &store_inst)
     }
 
     if (storeQueue[store_idx].size() == 0) {
-        DPRINTF(LSQUnit,"Fault on Store PC %s, [sn:%lli], Size = 0\n",
+        DPRINTF(LSQUnit, "Fault on Store PC %s, [sn:%lli], Size = 0\n",
                 store_inst->pcState(), store_inst->seqNum);
 
         if (store_inst->isAtomic()) {
@@ -729,12 +800,10 @@ LSQUnit::executeStore(const DynInstPtr &store_inst)
         // Store conditionals and Atomics need to set themselves as able to
         // writeback if we haven't had a fault by here.
         storeQueue[store_idx].canWB() = true;
-
         ++storesToWB;
     }
 
     return checkViolations(loadIt, store_inst);
-
 }
 
 void
@@ -850,6 +919,33 @@ LSQUnit::writebackStores()
 
         DynInstPtr inst = storeWBIt->instruction();
         LSQRequest* request = storeWBIt->request();
+
+        bool sttShadowStore = shouldShadowStore(inst);
+
+       if (sttShadowStore) {
+    DPRINTF(LSQUnit,
+            "STT: shadow-suppressing store writeback [sn:%lli] PC %s\n",
+            inst->seqNum, inst->pcState());
+
+    inst->setExplicitShadowedStore(true);
+
+    auto cur_it = storeWBIt;
+    completeStore(cur_it);
+
+    if (storeQueue.empty()) {
+        storeWBIt = storeQueue.end();
+    } else {
+        storeWBIt = storeQueue.begin();
+        while (storeWBIt.dereferenceable() &&
+               storeWBIt->valid() &&
+               storeWBIt->completed()) {
+            ++storeWBIt;
+        }
+    }
+
+    iewStage->updateLSQNextCycle = true;
+    continue;
+}
 
         // Process store conditionals or store release after all previous
         // stores are completed
@@ -1095,6 +1191,84 @@ LSQUnit::storePostSend()
     }
 
     storeWBIt++;
+}
+
+bool
+LSQUnit::shouldShadowLoad(const DynInstPtr &inst, Fault fault) const
+{
+    if (!inst) {
+        return false;
+    }
+
+    if (!inst->hasRequest()) {
+        return false;
+    }
+
+    if (!cpu->shouldIsolateSpeculativeTransmitter(inst)) {
+        return false;
+    }
+
+    if (inst->isTranslationDelayed()) {
+        return false;
+    }
+
+    if (fault != NoFault &&
+        inst->translationCompleted() &&
+        inst->savedRequest &&
+        inst->savedRequest->isPartialFault() &&
+        !inst->savedRequest->isComplete()) {
+        return false;
+    }
+
+    return true;
+}
+
+bool
+LSQUnit::shouldShadowStore(const DynInstPtr &inst) const
+{
+    if (!inst) {
+        return false;
+    }
+
+    if (!inst->hasRequest()) {
+        return false;
+    }
+
+    if (!cpu->shouldIsolateSpeculativeTransmitter(inst)) {
+        return false;
+    }
+
+    return true;
+}
+
+void
+LSQUnit::completeShadowLoad(const DynInstPtr &inst, LSQRequest *request)
+{
+    assert(inst);
+    assert(request);
+
+    if (!inst->memData) {
+        inst->memData = new uint8_t[request->mainReq()->getSize()];
+    }
+    memset(inst->memData, 0, request->mainReq()->getSize());
+
+    DPRINTF(LSQUnit,
+            "STT: shadow-completing explicit-blocked load [sn:%lli] PC %s\n",
+            inst->seqNum, inst->pcState());
+
+    PacketPtr shadow_pkt = new Packet(request->mainReq(), MemCmd::ReadReq);
+    shadow_pkt->dataStatic(inst->memData);
+
+    inst->fault = NoFault;
+    inst->setExecuted();
+    inst->setExplicitShadowedLoad(true);
+    inst->completeAcc(shadow_pkt);
+
+    iewStage->instToCommit(inst);
+    iewStage->activityThisCycle();
+    iewStage->checkMisprediction(inst);
+
+    delete shadow_pkt;
 }
 
 void
@@ -1345,17 +1519,10 @@ LSQUnit::read(LSQRequest *request, ssize_t load_idx)
 
     load_entry.setRequest(request);
     assert(load_inst);
-
     assert(!load_inst->isExecuted());
 
-    // Make sure this isn't a strictly ordered load
-    // A bit of a hackish way to get strictly ordered accesses to work
-    // only if they're at the head of the LSQ and are ready to commit
-    // (at the head of the ROB too).
     if (request->mainReq()->isStrictlyOrdered() &&
         (load_idx != loadQueue.head() || !load_inst->isAtCommit())) {
-        // Tell IQ/mem dep unit that this instruction will need to be
-        // rescheduled eventually
         iewStage->rescheduleMemInst(load_inst);
         load_inst->clearIssued();
         load_inst->effAddrValid(false);
@@ -1363,8 +1530,6 @@ LSQUnit::read(LSQRequest *request, ssize_t load_idx)
         DPRINTF(LSQUnit, "Strictly ordered load [sn:%lli] PC %s\n",
                 load_inst->seqNum, load_inst->pcState());
 
-        // Must delete request now that it wasn't handed off to
-        // memory. This is quite ugly.
         load_entry.setRequest(nullptr);
         request->discard();
         return std::make_shared<GenericISA::M5PanicFault>(
@@ -1372,12 +1537,19 @@ LSQUnit::read(LSQRequest *request, ssize_t load_idx)
             load_inst->seqNum, load_inst->pcState());
     }
 
+    // bool sttExplicitShadowLoad =
+    //     cpu->shouldIsolateSpeculativeTransmitter(load_inst);
+
+    // if (sttExplicitShadowLoad) {
+    //     completeShadowLoad(load_inst, request);
+    //     return NoFault;
+    // }
+
     DPRINTF(LSQUnit, "Read called, load idx: %i, store idx: %i, "
             "storeHead: %i addr: %#x%s\n",
             load_idx - 1, load_inst->sqIt._idx, storeQueue.head() - 1,
             request->mainReq()->getPaddr(), request->isSplit() ? " split" :
             "");
-
     if (request->mainReq()->isLLSC()) {
         // Disable recording the result temporarily. Writing to misc
         // regs normally updates the result, but this is not the

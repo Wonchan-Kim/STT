@@ -218,7 +218,7 @@ class MemDepUnit
     };
 
     /** Finds the memory dependence entry in the hash map. */
-    MemDepEntryPtr &findInHash(const DynInstConstPtr& inst);
+    MemDepEntryPtr *findInHash(const DynInstConstPtr& inst);
 
     /** Moves an entry to the ready list. */
     void moveToReady(MemDepEntryPtr &ready_inst_entry);

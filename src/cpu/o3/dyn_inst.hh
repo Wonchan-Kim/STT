@@ -88,7 +88,8 @@ class DynInst : public ExecContext, public RefCounted
     bool addrTainted = false;
     bool argsTainted = false;
     bool controlTainted = false;
-
+    bool explicitShadowedLoad = false;
+    bool explicitShadowedStore = false;
   protected:
     enum Status
     {
@@ -216,6 +217,10 @@ class DynInst : public ExecContext, public RefCounted
     bool isAddrTainted() const { return addrTainted; }
     bool isArgsTainted() const { return argsTainted; }
     bool isControlTainted() const { return controlTainted; }
+    bool isExplicitShadowedLoad() const { return explicitShadowedLoad; }
+    void setExplicitShadowedLoad(bool v) { explicitShadowedLoad = v; }
+    bool isExplicitShadowedStore() const { return explicitShadowedStore; }
+    void setExplicitShadowedStore(bool v) { explicitShadowedStore = v; }
 
     void setDataTainted(bool v) { dataTainted = v; }
     void setAddrTainted(bool v) { addrTainted = v; }
@@ -462,11 +467,9 @@ class DynInst : public ExecContext, public RefCounted
     bool isSquashed() const { return status[Squashed]; }
 
     void setInIQ(IQUnit *_iq)
-    {
-        assert(!iq);
-        status.set(IqEntry);
-        iq = _iq;
-    }
+{
+    iq = _iq;
+}
 
     void clearInIQ();
 

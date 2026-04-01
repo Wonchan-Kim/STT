@@ -7,7 +7,7 @@
  * The license below extends only to copyright in the software and shall
  * not be construed as granting a license to any other intellectual
  * property including but not limited to intellectual property relating
- * to a hardware implementation of the functionality of the software
+ * to a hardware implementation of the software
  * licensed hereunder.  You may use the software subject to the license
  * terms below provided that you ensure that this notice is replicated
  * unmodified and in its entirety in all distributions of the software,
@@ -378,8 +378,6 @@ CPU::tick()
     ++baseStats.numCycles;
     updateCycleCounters(BaseCPU::CPU_STATE_ON);
 
-//    activity = false;
-
     //Tick each of the stages
     bac.tick();
 
@@ -651,7 +649,6 @@ CPU::removeThread(ThreadID tid)
     // If thread is suspended, it might be re-allocated
     // copyToTC(tid);
 
-
     // @todo: 2-27-2008: Fix how we free up rename mappings
     // here to alleviate the case for double-freeing registers
     // in SMT workloads.
@@ -802,18 +799,12 @@ CPU::recordInstTaintedDestReg(InstSeqNum seq_num, PhysRegIdPtr reg)
     if (std::find(vec.begin(), vec.end(), reg) == vec.end()) {
         vec.push_back(reg);
     }
-
-    DPRINTF(O3CPU, "STT map record: sn=%llu size=%llu\n",
-            seq_num, (unsigned long long)vec.size());
 }
 
 const std::vector<PhysRegIdPtr>*
 CPU::getInstTaintedDestRegs(InstSeqNum seq_num) const
 {
     auto it = instTaintedDestRegs.find(seq_num);
-
-    DPRINTF(O3CPU, "STT map lookup: sn=%llu found=%d\n",
-            seq_num, it != instTaintedDestRegs.end());
 
     if (it == instTaintedDestRegs.end()) {
         return nullptr;
@@ -824,8 +815,72 @@ CPU::getInstTaintedDestRegs(InstSeqNum seq_num) const
 void
 CPU::clearInstTaintedDestRegs(InstSeqNum seq_num)
 {
-    DPRINTF(O3CPU, "STT map clear: sn=%llu\n", seq_num);
     instTaintedDestRegs.erase(seq_num);
+}
+
+bool
+CPU::shouldBlockExplicitMemAccess(const DynInstPtr &inst) const
+{
+    if (!inst) {
+        return false;
+    }
+
+    return sttEnabled &&
+           explicitChannelEnabled &&
+           (inst->isArgsTainted() ||
+            inst->isControlTainted() ||
+            inst->isDataTainted() ||
+            inst->isAddrTainted());
+}
+
+bool
+CPU::shouldUseImplicitPolicy(const DynInstPtr &inst) const
+{
+    if (!sttEnabled || !implicitChannelEnabled || !inst) {
+        return false;
+    }
+
+    return inst->isArgsTainted() ||
+           inst->isControlTainted() ||
+           inst->isDataTainted() ||
+           inst->isAddrTainted();
+}
+
+bool
+CPU::shouldUseExplicitPolicy(const DynInstPtr &inst) const
+{
+    if (!sttEnabled || !explicitChannelEnabled || !inst) {
+        return false;
+    }
+
+    return inst->isArgsTainted() ||
+           inst->isControlTainted() ||
+           inst->isDataTainted() ||
+           inst->isAddrTainted();
+}
+
+bool
+CPU::shouldUseFuturisticPolicy(const DynInstPtr &inst) const
+{
+    if (!sttEnabled || !futuristicModelEnabled || !inst) {
+        return false;
+    }
+
+    return inst->isArgsTainted() ||
+           inst->isControlTainted() ||
+           inst->isDataTainted() ||
+           inst->isAddrTainted();
+}
+
+bool
+CPU::shouldIsolateSpeculativeTransmitter(const DynInstPtr &inst) const
+{
+    if (!inst) {
+        return false;
+    }
+
+    return shouldUseExplicitPolicy(inst) ||
+           shouldUseFuturisticPolicy(inst);
 }
 
 bool
@@ -1099,6 +1154,7 @@ CPU::setReg(PhysRegIdPtr phys_reg, RegVal val, ThreadID tid)
     }
     regFile.setReg(phys_reg, val);
 }
+
 bool
 CPU::isRegTainted(PhysRegIdPtr reg) const
 {
@@ -1117,6 +1173,7 @@ CPU::setRegTaint(PhysRegIdPtr reg, bool tainted)
 
     regTaint[reg] = tainted;
 }
+
 void
 CPU::clearRegTaint(PhysRegIdPtr reg)
 {
@@ -1125,6 +1182,7 @@ CPU::clearRegTaint(PhysRegIdPtr reg)
 
     regTaint[reg] = false;
 }
+
 void
 CPU::setReg(PhysRegIdPtr phys_reg, const void *val, ThreadID tid)
 {

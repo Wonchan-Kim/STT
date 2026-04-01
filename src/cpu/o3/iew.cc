@@ -6,7 +6,7 @@
  * The license below extends only to copyright in the software and shall
  * not be construed as granting a license to any other intellectual
  * property including but not limited to intellectual property relating
- * to a hardware implementation of the functionality of the software
+ * to a hardware implementation of the software
  * licensed hereunder.  You may use the software subject to the license
  * terms below provided that you ensure that this notice is replicated
  * unmodified and in its entirety in all distributions of the software,
@@ -592,6 +592,12 @@ IEW::cacheUnblocked()
 void
 IEW::instToCommit(const DynInstPtr& inst)
 {
+    DPRINTF(IEW,
+        "STT/debug: instToCommit called for [sn:%llu] PC %s executed=%d mem=%d shadowStore=%d squashed=%d\n",
+        inst->seqNum, inst->pcState(),
+        inst->isExecuted(), inst->isMemRef(),
+        inst->isExplicitShadowedStore(),
+        inst->isSquashed());
     // This function should not be called after writebackInsts in a
     // single cycle.  That will cause problems with an instruction
     // being added to the queue to commit without being processed by
@@ -986,7 +992,6 @@ IEW::dispatchInsts(ThreadID tid)
             inst->clearHtmTransactionalState();
         }
 
-
         // Otherwise issue the instruction just fine.
         if (inst->isAtomic()) {
             DPRINTF(IEW, "[tid:%i] Issue: Memory instruction "
@@ -1146,20 +1151,19 @@ IEW::executeInsts()
 
     // Uncomment this if you want to see all available instructions.
     // @todo This doesn't actually work anymore, we should fix it.
-//    printAvailableInsts();
+    //    printAvailableInsts();
 
     // Execute/writeback any instructions that are available.
     int insts_to_execute = fromIssue->size;
     int inst_num = 0;
-    for (; inst_num < insts_to_execute;
-          ++inst_num) {
+    for (; inst_num < insts_to_execute; ++inst_num) {
 
         DPRINTF(IEW, "Execute: Executing instructions from IQ.\n");
 
         DynInstPtr inst = instQueue.getInstToExecute();
 
         DPRINTF(IEW, "Execute: Processing PC %s, [tid:%i] [sn:%llu].\n",
-                inst->pcState(), inst->threadNumber,inst->seqNum);
+                inst->pcState(), inst->threadNumber, inst->seqNum);
 
         // Notify potential listeners that this instruction has started
         // executing
@@ -1168,19 +1172,18 @@ IEW::executeInsts()
         // Check if the instruction is squashed; if so then skip it
         if (inst->isSquashed()) {
             DPRINTF(IEW, "Execute: Instruction was squashed. PC: %s, [tid:%i]"
-                         " [sn:%llu]\n", inst->pcState(), inst->threadNumber,
-                         inst->seqNum);
+                         " [sn:%llu]\n",
+                    inst->pcState(), inst->threadNumber, inst->seqNum);
 
             // Consider this instruction executed so that commit can go
             // ahead and retire the instruction.
             inst->setExecuted();
 
             // Not sure if I should set this here or just let commit try to
-            // commit any squashed instructions.  I like the latter a bit more.
+            // commit any squashed instructions. I like the latter a bit more.
             inst->setCanCommit();
 
             ++iewStats.executedInstStats.numSquashedInsts;
-
             continue;
         }
 
@@ -1198,8 +1201,7 @@ IEW::executeInsts()
                 // AMOs are treated like store requests
                 fault = ldstQueue.executeStore(inst);
 
-                if (inst->isTranslationDelayed() &&
-                    fault == NoFault) {
+                if (inst->isTranslationDelayed() && fault == NoFault) {
                     // A hw page table walk is currently going on; the
                     // instruction must be deferred.
                     DPRINTF(IEW, "Execute: Delayed translation, deferring "
@@ -1207,13 +1209,13 @@ IEW::executeInsts()
                     instQueue.deferMemInst(inst);
                     continue;
                 }
+
             } else if (inst->isLoad()) {
                 // Loads will mark themselves as executed, and their writeback
                 // event adds the instruction to the queue to commit
                 fault = ldstQueue.executeLoad(inst);
 
-                if (inst->isTranslationDelayed() &&
-                    fault == NoFault) {
+                if (inst->isTranslationDelayed() && fault == NoFault) {
                     // A hw page table walk is currently going on; the
                     // instruction must be deferred.
                     DPRINTF(IEW, "Execute: Delayed translation, deferring "
@@ -1225,11 +1227,23 @@ IEW::executeInsts()
                 if (inst->isDataPrefetch() || inst->isInstPrefetch()) {
                     inst->fault = NoFault;
                 }
+
             } else if (inst->isStore()) {
+                DPRINTF(IEW,
+                    "STT/store-check: about to execute store [sn:%llu] PC %s "
+                    "args=%d ctrl=%d data=%d addr=%d explicit=%d futuristic=%d isolate=%d\n",
+                    inst->seqNum, inst->pcState(),
+                    inst->isArgsTainted(),
+                    inst->isControlTainted(),
+                    inst->isDataTainted(),
+                    inst->isAddrTainted(),
+                    cpu->shouldUseExplicitPolicy(inst),
+                    cpu->shouldUseFuturisticPolicy(inst),
+                    cpu->shouldIsolateSpeculativeTransmitter(inst));
+
                 fault = ldstQueue.executeStore(inst);
 
-                if (inst->isTranslationDelayed() &&
-                    fault == NoFault) {
+                if (inst->isTranslationDelayed() && fault == NoFault) {
                     // A hw page table walk is currently going on; the
                     // instruction must be deferred.
                     DPRINTF(IEW, "Execute: Delayed translation, deferring "
@@ -1238,21 +1252,31 @@ IEW::executeInsts()
                     continue;
                 }
 
+                // Shadowed store was already handled inside LSQUnit.
+                // Do NOT run the normal store-complete path again.
+                if (inst->isExplicitShadowedStore()) {
+                    DPRINTF(IEW,
+                            "STT/debug: skipping normal IEW store completion "
+                            "for shadowed store [sn:%llu] PC %s\n",
+                            inst->seqNum, inst->pcState());
+                    continue;
+                }
+
                 // If the store had a fault then it may not have a mem req
                 if (fault != NoFault || !inst->readPredicate() ||
                         !inst->isStoreConditional()) {
                     // If the instruction faulted, then we need to send it
                     // along to commit without the instruction completing.
-                    // Send this instruction to commit, also make sure iew
+                    // Send this instruction to commit, also make sure IEW
                     // stage realizes there is activity.
                     inst->setExecuted();
                     instToCommit(inst);
                     activityThisCycle();
                 }
 
-                // Store conditionals will mark themselves as
-                // executed, and their writeback event will add the
-                // instruction to the queue to commit.
+                // Store conditionals will mark themselves as executed, and
+                // their writeback event will add the instruction to the queue
+                // to commit.
             } else {
                 panic("Unexpected memory type!\n");
             }
@@ -1269,19 +1293,18 @@ IEW::executeInsts()
             }
 
             inst->setExecuted();
-
             instToCommit(inst);
         }
 
         updateExeInstStats(inst);
 
         // Check if branch prediction was correct, if not then we need
-        // to tell commit to squash in flight instructions.  Only
+        // to tell commit to squash in-flight instructions. Only
         // handle this if there hasn't already been something that
         // redirects fetch in this group of instructions.
 
         // This probably needs to prioritize the redirects if a different
-        // scheduler is used.  Currently the scheduler schedules the oldest
+        // scheduler is used. Currently the scheduler schedules the oldest
         // instruction first, so the branch resolution order will be correct.
         ThreadID tid = inst->threadNumber;
 
@@ -1289,7 +1312,7 @@ IEW::executeInsts()
             !toCommit->squash[tid] ||
             toCommit->squashedSeqNum[tid] > inst->seqNum) {
 
-            // Prevent testing for misprediction on load instructions,
+            // Prevent testing for misprediction on load instructions
             // that have not been executed.
             bool loadNotExecuted = !inst->isExecuted() && inst->isLoad();
 
@@ -1305,6 +1328,7 @@ IEW::executeInsts()
                 DPRINTF(IEW, "[tid:%i] [sn:%llu] Execute: "
                         "Redirecting fetch to PC: %s\n",
                         tid, inst->seqNum, inst->pcState());
+
                 // If incorrect, then signal the ROB that it must be squashed.
                 squashDueToBranch(inst, tid);
 
@@ -1317,8 +1341,9 @@ IEW::executeInsts()
                 }
             } else if (ldstQueue.violation(tid)) {
                 assert(inst->isMemRef());
+
                 // If there was an ordering violation, then get the
-                // DynInst that caused the violation.  Note that this
+                // DynInst that caused the violation. Note that this
                 // clears the violation signal.
                 DynInstPtr violator;
                 violator = ldstQueue.getMemDepViolator(tid);
@@ -1330,7 +1355,7 @@ IEW::executeInsts()
 
                 fetchRedirect[tid] = true;
 
-                // Tell the instruction queue that a violation has occured.
+                // Tell the instruction queue that a violation has occurred.
                 instQueue.violation(inst, violator);
 
                 // Squash.
@@ -1346,8 +1371,8 @@ IEW::executeInsts()
 
                 DynInstPtr violator = ldstQueue.getMemDepViolator(tid);
 
-                DPRINTF(IEW, "LDSTQ detected a violation.  Violator PC: "
-                        "%s, inst PC: %s.  Addr is: %#x.\n",
+                DPRINTF(IEW, "LDSTQ detected a violation. Violator PC: "
+                        "%s, inst PC: %s. Addr is: %#x.\n",
                         violator->pcState(), inst->pcState(),
                         inst->physEffAddr);
                 DPRINTF(IEW, "Violation will not be handled because "
@@ -1365,15 +1390,13 @@ IEW::executeInsts()
         }
 
         updatedQueues = true;
-
         cpu->activityThisCycle();
     }
 
     // Need to reset this in case a writeback event needs to write into the
-    // iew queue.  That way the writeback event will write into the correct
+    // IEW queue. That way the writeback event will write into the correct
     // spot in the queue.
     wbNumInst = 0;
-
 }
 
 void

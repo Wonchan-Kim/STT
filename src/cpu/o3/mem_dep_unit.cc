@@ -100,7 +100,7 @@ MemDepUnit::init(const BaseO3CPUParams &params, ThreadID tid, CPU *cpu)
 {
     _name = csprintf("%s.memDep%d", params.name, tid);
 
-    DPRINTF(MemDepUnit, "Creating MemDepUnit %i object.\n",tid);
+    DPRINTF(MemDepUnit, "Creating MemDepUnit %i object.\n", tid);
 
     id = tid;
 
@@ -154,7 +154,6 @@ MemDepUnit::drainSanityCheck() const
 void
 MemDepUnit::takeOverFrom()
 {
-    // Be sure to reset all state.
     loadBarrierSNs.clear();
     storeBarrierSNs.clear();
     depPred.clear();
@@ -205,7 +204,6 @@ MemDepUnit::insert(const DynInstPtr &inst)
 
     MemDepEntryPtr inst_entry = std::make_shared<MemDepEntry>(inst);
 
-    // Add the MemDepEntry to the hash.
     memDepHash.insert(
         std::pair<InstSeqNum, MemDepEntryPtr>(inst->seqNum, inst_entry));
 #ifdef GEM5_DEBUG
@@ -213,12 +211,9 @@ MemDepUnit::insert(const DynInstPtr &inst)
 #endif
 
     instList[tid].push_back(inst);
-
     inst_entry->listIt = --(instList[tid].end());
 
-    // Check any barriers and the dependence predictor for any
-    // producing memrefs/stores.
-    std::vector<InstSeqNum>  producing_stores;
+    std::vector<InstSeqNum> producing_stores;
     if ((inst->isLoad() || inst->isAtomic()) && hasLoadBarrier()) {
         DPRINTF(MemDepUnit, "%d load barriers in flight\n",
                 loadBarrierSNs.size());
@@ -236,6 +231,7 @@ MemDepUnit::insert(const DynInstPtr &inst)
         if (dep != 0)
             producing_stores.push_back(dep);
     }
+
     bool sttConservativeMemDep =
         sttEnabled &&
         implicitChannelEnabled &&
@@ -250,9 +246,7 @@ MemDepUnit::insert(const DynInstPtr &inst)
                 "STT: considering conservative mem-dep handling for [sn:%lli] PC %s\n",
                 inst->seqNum, inst->pcState());
 
-        // If the predictor found no dependency, conservatively depend on all
-        // older in-flight stores/atomics/barriers in this thread.
-                if (producing_stores.empty()) {
+        if (producing_stores.empty()) {
             InstSeqNum latest_producer = 0;
             bool found_latest = false;
 
@@ -288,12 +282,12 @@ MemDepUnit::insert(const DynInstPtr &inst)
             }
         }
     }
+
     std::vector<MemDepEntryPtr> store_entries;
 
-    // If there is a producing store, try to find the entry.
     for (auto producing_store : producing_stores) {
         DPRINTF(MemDepUnit, "Searching for producer [sn:%lli]\n",
-                            producing_store);
+                producing_store);
         MemDepHashIt hash_it = memDepHash.find(producing_store);
 
         if (hash_it != memDepHash.end()) {
@@ -302,8 +296,6 @@ MemDepUnit::insert(const DynInstPtr &inst)
         }
     }
 
-    // If no store entry, then instruction can issue as soon as the registers
-    // are ready.
     if (store_entries.empty()) {
         DPRINTF(MemDepUnit, "No dependency for inst PC "
                 "%s [sn:%lli].\n", inst->pcState(), inst->seqNum);
@@ -312,24 +304,21 @@ MemDepUnit::insert(const DynInstPtr &inst)
 
         if (inst->readyToIssue()) {
             inst_entry->regsReady = true;
-
             moveToReady(inst_entry);
         }
     } else {
-        // Otherwise make the instruction dependent on the store/barrier.
         DPRINTF(MemDepUnit, "Adding to dependency list\n");
-        for ([[maybe_unused]] auto producing_store : producing_stores)
+        for ([[maybe_unused]] auto producing_store : producing_stores) {
             DPRINTF(MemDepUnit, "\tinst PC %s is dependent on [sn:%lli].\n",
-                inst->pcState(), producing_store);
+                    inst->pcState(), producing_store);
+        }
 
         if (inst->readyToIssue()) {
             inst_entry->regsReady = true;
         }
 
-        // Clear the bit saying this instruction can issue.
         inst->clearCanIssue();
 
-        // Add this instruction to the list of dependents.
         for (auto store_entry : store_entries)
             store_entry->dependInsts.push_back(inst_entry);
 
@@ -342,7 +331,6 @@ MemDepUnit::insert(const DynInstPtr &inst)
         }
     }
 
-    // for load-acquire store-release that could also be a barrier
     insertBarrierSN(inst);
 
     if (inst->isStore() || inst->isAtomic()) {
@@ -350,7 +338,7 @@ MemDepUnit::insert(const DynInstPtr &inst)
                 inst->pcState(), inst->seqNum);
 
         depPred.insertStore(inst->pcState().instAddr(), inst->seqNum,
-                inst->threadNumber);
+                            inst->threadNumber);
 
         ++stats.insertedStores;
     } else if (inst->isLoad()) {
@@ -365,14 +353,12 @@ MemDepUnit::insertNonSpec(const DynInstPtr &inst)
 {
     insertBarrier(inst);
 
-    // Might want to turn this part into an inline function or something.
-    // It's shared between both insert functions.
     if (inst->isStore() || inst->isAtomic()) {
         DPRINTF(MemDepUnit, "Inserting store/atomic PC %s [sn:%lli].\n",
                 inst->pcState(), inst->seqNum);
 
         depPred.insertStore(inst->pcState().instAddr(), inst->seqNum,
-                inst->threadNumber);
+                            inst->threadNumber);
 
         ++stats.insertedStores;
     } else if (inst->isLoad()) {
@@ -389,16 +375,13 @@ MemDepUnit::insertBarrier(const DynInstPtr &barr_inst)
 
     MemDepEntryPtr inst_entry = std::make_shared<MemDepEntry>(barr_inst);
 
-    // Add the MemDepEntry to the hash.
     memDepHash.insert(
         std::pair<InstSeqNum, MemDepEntryPtr>(barr_inst->seqNum, inst_entry));
 #ifdef GEM5_DEBUG
     MemDepEntry::memdep_insert++;
 #endif
 
-    // Add the instruction to the instruction list.
     instList[tid].push_back(barr_inst);
-
     inst_entry->listIt = --(instList[tid].end());
 
     insertBarrierSN(barr_inst);
@@ -411,15 +394,18 @@ MemDepUnit::regsReady(const DynInstPtr &inst)
             "instruction PC %s [sn:%lli].\n",
             inst->pcState(), inst->seqNum);
 
-    MemDepEntryPtr inst_entry = findInHash(inst);
+    MemDepEntryPtr *inst_entry = findInHash(inst);
+    if (!inst_entry) {
+        return;
+    }
 
-    inst_entry->regsReady = true;
+    (*inst_entry)->regsReady = true;
 
-    if (inst_entry->memDeps == 0) {
+    if ((*inst_entry)->memDeps == 0) {
         DPRINTF(MemDepUnit, "Instruction has its memory "
                 "dependencies resolved, adding it to the ready list.\n");
 
-        moveToReady(inst_entry);
+        moveToReady(*inst_entry);
     } else {
         DPRINTF(MemDepUnit, "Instruction still waiting on "
                 "memory dependency.\n");
@@ -433,9 +419,12 @@ MemDepUnit::nonSpecInstReady(const DynInstPtr &inst)
             "instruction PC %s as ready [sn:%lli].\n",
             inst->pcState(), inst->seqNum);
 
-    MemDepEntryPtr inst_entry = findInHash(inst);
+    MemDepEntryPtr *inst_entry = findInHash(inst);
+    if (!inst_entry) {
+        return;
+    }
 
-    moveToReady(inst_entry);
+    moveToReady(*inst_entry);
 }
 
 void
@@ -449,16 +438,19 @@ MemDepUnit::replay()
 {
     DynInstPtr temp_inst;
 
-    // For now this replay function replays all waiting memory ops.
     while (!instsToReplay.empty()) {
         temp_inst = instsToReplay.front();
 
-        MemDepEntryPtr inst_entry = findInHash(temp_inst);
+        MemDepEntryPtr *inst_entry = findInHash(temp_inst);
+        if (!inst_entry) {
+            instsToReplay.pop_front();
+            continue;
+        }
 
         DPRINTF(MemDepUnit, "Replaying mem instruction PC %s [sn:%lli].\n",
                 temp_inst->pcState(), temp_inst->seqNum);
 
-        moveToReady(inst_entry);
+        moveToReady(*inst_entry);
 
         instsToReplay.pop_front();
     }
@@ -467,20 +459,29 @@ MemDepUnit::replay()
 void
 MemDepUnit::completed(const DynInstPtr &inst)
 {
+    DPRINTF(MemDepUnit,
+    "STT/debug: MemDep completed() entry for [sn:%llu] PC %s shadowStore=%d executed=%d squashed=%d\n",
+    inst->seqNum, inst->pcState(),
+    inst->isExplicitShadowedStore(),
+    inst->isExecuted(),
+    inst->isSquashed());
     DPRINTF(MemDepUnit, "Completed mem instruction PC %s [sn:%lli].\n",
             inst->pcState(), inst->seqNum);
 
     ThreadID tid = inst->threadNumber;
 
-    // Remove the instruction from the hash and the list.
     MemDepHashIt hash_it = memDepHash.find(inst->seqNum);
 
-    assert(hash_it != memDepHash.end());
+    if (hash_it == memDepHash.end()) {
+        DPRINTF(MemDepUnit,
+                "STT/defensive: completed() called for [sn:%llu] but no memDepHash entry exists; skipping\n",
+                inst->seqNum);
+        return;
+    }
 
     instList[tid].erase((*hash_it).second->listIt);
 
     (*hash_it).second = NULL;
-
     memDepHash.erase(hash_it);
 #ifdef GEM5_DEBUG
     MemDepEntry::memdep_erase++;
@@ -513,7 +514,7 @@ MemDepUnit::completeInst(const DynInstPtr &inst)
 
         if (barrier_type) {
             DPRINTF(MemDepUnit, "%s barrier completed: %s SN:%lli\n",
-                                barrier_type, inst->pcState(), inst->seqNum);
+                    barrier_type, inst->pcState(), inst->seqNum);
         }
     }
 }
@@ -521,19 +522,20 @@ MemDepUnit::completeInst(const DynInstPtr &inst)
 void
 MemDepUnit::wakeDependents(const DynInstPtr &inst)
 {
-    // Only stores, atomics and barriers have dependents.
     if (!inst->isStore() && !inst->isAtomic() && !inst->isReadBarrier() &&
         !inst->isWriteBarrier() && !inst->isHtmCmd()) {
         return;
     }
 
-    MemDepEntryPtr inst_entry = findInHash(inst);
+    MemDepEntryPtr *inst_entry = findInHash(inst);
+    if (!inst_entry) {
+        return;
+    }
 
-    for (int i = 0; i < inst_entry->dependInsts.size(); ++i ) {
-        MemDepEntryPtr woken_inst = inst_entry->dependInsts[i];
+    for (int i = 0; i < (*inst_entry)->dependInsts.size(); ++i) {
+        MemDepEntryPtr woken_inst = (*inst_entry)->dependInsts[i];
 
         if (!woken_inst->inst) {
-            // Potentially removed mem dep entries could be on this list
             continue;
         }
 
@@ -551,7 +553,7 @@ MemDepUnit::wakeDependents(const DynInstPtr &inst)
         }
     }
 
-    inst_entry->dependInsts.clear();
+    (*inst_entry)->dependInsts.clear();
 }
 
 MemDepUnit::MemDepEntry::MemDepEntry(const DynInstPtr &new_inst) :
@@ -607,7 +609,6 @@ MemDepUnit::squash(const InstSeqNum &squashed_num, ThreadID tid)
                 (*squash_it)->seqNum);
 
         loadBarrierSNs.erase((*squash_it)->seqNum);
-
         storeBarrierSNs.erase((*squash_it)->seqNum);
 
         hash_it = memDepHash.find((*squash_it)->seqNum);
@@ -615,7 +616,6 @@ MemDepUnit::squash(const InstSeqNum &squashed_num, ThreadID tid)
         assert(hash_it != memDepHash.end());
 
         (*hash_it).second->squashed = true;
-
         (*hash_it).second = NULL;
 
         memDepHash.erase(hash_it);
@@ -626,7 +626,6 @@ MemDepUnit::squash(const InstSeqNum &squashed_num, ThreadID tid)
         instList[tid].erase(squash_it--);
     }
 
-    // Tell the dependency predictor to squash as well.
     depPred.squash(squashed_num, tid);
 }
 
@@ -637,9 +636,9 @@ MemDepUnit::violation(const DynInstPtr &store_inst,
     DPRINTF(MemDepUnit, "Passing violating PCs to store sets,"
             " load: %#x, store: %#x\n", violating_load->pcState().instAddr(),
             store_inst->pcState().instAddr());
-    // Tell the memory dependence unit of the violation.
+
     depPred.violation(store_inst->pcState().instAddr(),
-            violating_load->pcState().instAddr());
+                      violating_load->pcState().instAddr());
 }
 
 void
@@ -651,14 +650,19 @@ MemDepUnit::issue(const DynInstPtr &inst)
     depPred.issued(inst->pcState().instAddr(), inst->seqNum, inst->isStore());
 }
 
-MemDepUnit::MemDepEntryPtr &
-MemDepUnit::findInHash(const DynInstConstPtr &inst)
+MemDepUnit::MemDepEntryPtr*
+MemDepUnit::findInHash(const DynInstConstPtr& inst)
 {
-    MemDepHashIt hash_it = memDepHash.find(inst->seqNum);
+    auto hash_it = memDepHash.find(inst->seqNum);
 
-    assert(hash_it != memDepHash.end());
+    if (hash_it == memDepHash.end()) {
+        DPRINTF(MemDepUnit,
+                "STT/defensive: findInHash miss for [sn:%llu] PC %s\n",
+                inst->seqNum, inst->pcState());
+        return nullptr;
+    }
 
-    return (*hash_it).second;
+    return &hash_it->second;
 }
 
 void

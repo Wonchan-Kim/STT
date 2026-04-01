@@ -224,8 +224,9 @@ for cpu in system.cpu:
 for cpu in system.cpu:
     cpu.stt = True
     cpu.implicitChannel = True
-    print("STT config:", cpu.stt, cpu.implicitChannel)
-
+    cpu.explicitChannel = False
+    cpu.futuristicModel = True
+    
 if ObjectList.is_kvm_cpu(CPUClass) or ObjectList.is_kvm_cpu(FutureClass):
     if buildEnv["USE_X86_ISA"]:
         system.kvm_vm = KvmVM()

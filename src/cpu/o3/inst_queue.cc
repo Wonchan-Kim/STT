@@ -122,6 +122,10 @@ IQUnit::insert(const DynInstPtr &inst)
     _freeEntries--;
 
     inst->setInIQ(this);
+    DPRINTF(IQ,
+            "STT/debug: IQ insert [sn:%llu] tid=%i freeEntries=%u/%u threadCount=%u\n",
+            inst->seqNum, inst->threadNumber, _freeEntries, _numEntries,
+            count[inst->threadNumber] + 1);
 
     count[inst->threadNumber]++;
 }
@@ -133,6 +137,10 @@ IQUnit::remove(const DynInstPtr &inst)
     assert(_freeEntries <= _numEntries);
 
     count[inst->threadNumber]--;
+    DPRINTF(IQ,
+            "STT/debug: IQ remove [sn:%llu] tid=%i freeEntries=%u/%u threadCount=%u\n",
+            inst->seqNum, inst->threadNumber, _freeEntries, _numEntries,
+            count[inst->threadNumber]);
 }
 
 void
@@ -863,14 +871,6 @@ InstructionQueue::scheduleReadyInsts()
         addReadyMemInst(mem_inst);
     }
 
-    // Have iterator to head of the list
-    // While I haven't exceeded bandwidth or reached the end of the list,
-    // Try to get a FU that can do what this op needs.
-    // If successful, change the oldestInst to the new top of the list, put
-    // the queue in the proper place in the list.
-    // Increment the iterator.
-    // This will avoid trying to schedule a certain op class if there are no
-    // FUs that handle it.
     int total_issued = 0;
     ListOrderIt order_it = listOrder.begin();
     ListOrderIt order_end_it = listOrder.end();
@@ -930,31 +930,20 @@ InstructionQueue::scheduleReadyInsts()
             }
         }
 
-        // If we have an instruction that doesn't require a FU, or a
-        // valid FU, then schedule for execution.
         if (idx > FUPool::NoFreeFU || idx == FUPool::NoNeedFU ||
             idx == FUPool::NoCapableFU) {
             if (op_latency == Cycles(1)) {
                 i2e_info->size++;
                 instsToExecute.push_back(issuing_inst);
 
-                // Add the FU onto the list of FU's to be freed next
-                // cycle if we used one.
                 if (idx >= 0)
                     fu_pool->freeUnitNextCycle(idx);
 
-                // CPU has no capable FU for the instruction
-                // but this may be OK if the instruction gets
-                // squashed. Remember this and give IEW
-                // the opportunity to trigger a fault
-                // if the instruction is unsupported.
-                // Otherwise, commit will panic.
                 if (idx == FUPool::NoCapableFU)
                   issuing_inst->setNoCapableFU();
             } else {
                 assert(idx != FUPool::NoCapableFU);
                 bool pipelined = fu_pool->isPipelined(op_class);
-                // Generate completion event for the FU
                 ++wbOutstanding;
                 auto execution =
                     new FUCompletion(issuing_inst, fu_pool, idx, this);
@@ -963,11 +952,8 @@ InstructionQueue::scheduleReadyInsts()
                               cpu->clockEdge(Cycles(op_latency - 1)));
 
                 if (!pipelined) {
-                    // If FU isn't pipelined, then it must be freed
-                    // upon the execution completing.
                     execution->setFreeFU();
                 } else {
-                    // Add the FU onto the list of FU's to be freed next cycle.
                     fu_pool->freeUnitNextCycle(idx);
                 }
             }
@@ -997,9 +983,16 @@ InstructionQueue::scheduleReadyInsts()
                 issuing_inst->firstIssue = curTick();
 
             if (!issuing_inst->isMemRef()) {
-                // Memory instructions can not be freed from the IQ until they
-                // complete.
+                DPRINTF(IQ,
+                        "STT/debug: IQ issue-path clearInIQ [sn:%llu] before_clear free=%u total=%u\n",
+                        issuing_inst->seqNum, numFreeEntries(), totalWidth);
                 issuing_inst->clearInIQ();
+                if (iq) {
+                    iq->remove(issuing_inst);
+                }
+                DPRINTF(IQ,
+                        "STT/debug: IQ issue-path post-remove [sn:%llu] free=%u\n",
+                        issuing_inst->seqNum, numFreeEntries());
             } else {
                 memDepUnit[tid].issue(issuing_inst);
             }
@@ -1017,10 +1010,6 @@ InstructionQueue::scheduleReadyInsts()
     iqStats.numIssuedDist.sample(total_issued);
     iqStats.instsIssued+= total_issued;
 
-    // If we issued any instructions, tell the CPU we had activity.
-    // @todo If the way deferred memory instructions are handeled due to
-    // translation changes then the deferredMemInsts condition should be
-    // removed from the code below.
     if (total_issued || !retryMemInsts.empty() || !deferredMemInsts.empty()) {
         cpu->activityThisCycle();
     } else {
@@ -1075,7 +1064,6 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
 {
     int dependents = 0;
 
-    // The instruction queue here takes care of both floating and int ops
     if (completed_inst->isFloating()) {
         iqIOStats.fpInstQueueWakeupAccesses++;
     } else if (completed_inst->isVector()) {
@@ -1090,21 +1078,34 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
 
     assert(!completed_inst->isSquashed());
 
-    // Tell the memory dependence unit to wake any dependents on this
-    // instruction if it is a memory instruction.  Also complete the memory
-    // instruction at this point since we know it executed without issues.
     ThreadID tid = completed_inst->threadNumber;
     if (completed_inst->isMemRef()) {
+        DPRINTF(IQ,
+    "STT/debug: IQ completeMemInst called for [sn:%llu] PC %s shadowStore=%d executed=%d squashed=%d memOpDone=%d\n",
+    completed_inst->seqNum, completed_inst->pcState(),
+    completed_inst->isExplicitShadowedStore(),
+    completed_inst->isExecuted(),
+    completed_inst->isSquashed(),
+    completed_inst->memOpDone());
         memDepUnit[tid].completeInst(completed_inst);
 
         DPRINTF(IQ, "Completing mem instruction PC: %s [sn:%llu]\n",
             completed_inst->pcState(), completed_inst->seqNum);
 
+        DPRINTF(IQ,
+                "STT/debug: IQ complete-path clearInIQ [sn:%llu] before_clear free=%u\n",
+                completed_inst->seqNum, numFreeEntries());
+        IQUnit *iq = completed_inst->iq;
         completed_inst->clearInIQ();
+        if (iq) {
+            iq->remove(completed_inst);
+        }
+        DPRINTF(IQ,
+                "STT/debug: IQ complete-path post-remove [sn:%llu] free=%u\n",
+                completed_inst->seqNum, numFreeEntries());
         completed_inst->memOpDone(true);
     } else if (completed_inst->isReadBarrier() ||
                completed_inst->isWriteBarrier()) {
-        // Completes a non mem ref barrier
         memDepUnit[tid].completeInst(completed_inst);
     }
 
@@ -1115,15 +1116,12 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
         PhysRegIdPtr dest_reg =
             completed_inst->renamedDestIdx(dest_reg_idx);
 
-        // Special case of uniq or control registers.  They are not
-        // handled by the IQ and thus have no dependency graph entry.
         if (dest_reg->isAlwaysReady()) {
             DPRINTF(IQ, "Reg %d [%s] is part of a fix mapping, skipping\n",
                     dest_reg->index(), dest_reg->className());
             continue;
         }
 
-        // Avoid waking up dependents if the register is pinned
         dest_reg->decrNumPinnedWritesToComplete();
         if (dest_reg->isPinned())
             completed_inst->setPinnedRegsWritten();
@@ -1138,18 +1136,12 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
                 dest_reg->index(),
                 dest_reg->className());
 
-        //Go through the dependency chain, marking the registers as
-        //ready within the waiting instructions.
         DynInstPtr dep_inst = dependGraph.pop(dest_reg->flatIndex());
 
         while (dep_inst) {
             DPRINTF(IQ, "Waking up a dependent instruction, [sn:%llu] "
                     "PC %s.\n", dep_inst->seqNum, dep_inst->pcState());
 
-            // Might want to give more information to the instruction
-            // so that it knows which of its source registers is
-            // ready.  However that would mean that the dependency
-            // graph entries would need to hold the src_reg_idx.
             dep_inst->markSrcRegReady();
 
             addIfReady(dep_inst);
@@ -1159,12 +1151,9 @@ InstructionQueue::wakeDependents(const DynInstPtr &completed_inst)
             ++dependents;
         }
 
-        // Reset the head node now that all of its dependents have
-        // been woken up.
         assert(dependGraph.empty(dest_reg->flatIndex()));
         dependGraph.clearInst(dest_reg->flatIndex());
 
-        // Mark the scoreboard as having that register ready.
         regScoreboard[dest_reg->flatIndex()] = true;
     }
     return dependents;
@@ -1179,8 +1168,6 @@ InstructionQueue::addReadyMemInst(const DynInstPtr &ready_inst)
 
     readyInsts[op_class].push(ready_inst);
 
-    // Will need to reorder the list if either a queue is not on the list,
-    // or it has an older instruction than last time.
     if (!queueOnList[op_class]) {
         addToOrderList(op_class);
     } else if (readyInsts[op_class].top()->seqNum  <
@@ -1199,7 +1186,6 @@ InstructionQueue::rescheduleMemInst(const DynInstPtr &resched_inst)
 {
     DPRINTF(IQ, "Rescheduling mem inst [sn:%llu]\n", resched_inst->seqNum);
 
-    // Reset DTB translation state
     resched_inst->translationStarted(false);
     resched_inst->translationCompleted(false);
 
@@ -1242,7 +1228,6 @@ InstructionQueue::cacheUnblocked()
     DPRINTF(IQ, "Cache is unblocked, rescheduling blocked memory "
             "instructions\n");
     retryMemInsts.splice(retryMemInsts.end(), blockedMemInsts);
-    // Get the CPU ticking again
     cpu->wakeCPU();
 }
 
@@ -1296,28 +1281,22 @@ InstructionQueue::squash(ThreadID tid)
     DPRINTF(IQ, "[tid:%i] Starting to squash instructions in "
             "the IQ.\n", tid);
 
-    // Read instruction sequence number of last instruction out of the
-    // time buffer.
     squashedSeqNum[tid] = fromCommit->commitInfo[tid].doneSeqNum;
 
     doSquash(tid);
 
-    // Also tell the memory dependence unit to squash.
     memDepUnit[tid].squash(squashedSeqNum[tid], tid);
 }
 
 void
 InstructionQueue::doSquash(ThreadID tid)
 {
-    // Start at the tail.
     ListIt squash_it = instList[tid].end();
     --squash_it;
 
     DPRINTF(IQ, "[tid:%i] Squashing until sequence number %i!\n",
             tid, squashedSeqNum[tid]);
 
-    // Squash any instructions younger than the squashed sequence number
-    // given.
     while (squash_it != instList[tid].end() &&
            (*squash_it)->seqNum > squashedSeqNum[tid]) {
 
@@ -1330,8 +1309,6 @@ InstructionQueue::doSquash(ThreadID tid)
             iqIOStats.intInstQueueWrites++;
         }
 
-        // Only handle the instruction if it actually is in the IQ and
-        // hasn't already been squashed in the IQ.
         if (squashed_inst->threadNumber != tid ||
             squashed_inst->isSquashedInIQ()) {
             --squash_it;
@@ -1350,7 +1327,6 @@ InstructionQueue::doSquash(ThreadID tid)
                           (squashed_inst->isStore() &&
                              !squashed_inst->isStoreConditional()));
 
-            // Remove the instruction from the dependency list.
             if (is_acq_rel ||
                 (!squashed_inst->isNonSpeculative() &&
                  !squashed_inst->isStoreConditional() &&
@@ -1364,15 +1340,6 @@ InstructionQueue::doSquash(ThreadID tid)
                 {
                     PhysRegIdPtr src_reg =
                         squashed_inst->renamedSrcIdx(src_reg_idx);
-
-                    // Only remove it from the dependency graph if it
-                    // was placed there in the first place.
-
-                    // Instead of doing a linked list traversal, we
-                    // can just remove these squashed instructions
-                    // either at issue time, or when the register is
-                    // overwritten.  The only downside to this is it
-                    // leaves more room for error.
 
                     if (!squashed_inst->readySrcIdx(src_reg_idx) &&
                         !src_reg->isAlwaysReady()) {
@@ -1388,13 +1355,7 @@ InstructionQueue::doSquash(ThreadID tid)
                 NonSpecMapIt ns_inst_it =
                     nonSpecInsts.find(squashed_inst->seqNum);
 
-                // we remove non-speculative instructions from
-                // nonSpecInsts already when they are ready, and so we
-                // cannot always expect to find them
                 if (ns_inst_it == nonSpecInsts.end()) {
-                    // loads that became ready but stalled on a
-                    // blocked cache are alreayd removed from
-                    // nonSpecInsts, and have not faulted
                     assert(squashed_inst->getFault() != NoFault ||
                            squashed_inst->isMemRef());
                 } else {
@@ -1407,25 +1368,24 @@ InstructionQueue::doSquash(ThreadID tid)
                 }
             }
 
-            // Might want to also clear out the head of the dependency graph.
-
-            // Mark it as squashed within the IQ.
             squashed_inst->setSquashedInIQ();
 
-            // @todo: Remove this hack where several statuses are set so the
-            // inst will flow through the rest of the pipeline.
             squashed_inst->setIssued();
             squashed_inst->setCanCommit();
+
+            DPRINTF(IQ,
+                    "STT/debug: IQ squash-path clearInIQ [sn:%llu] before_clear free=%u\n",
+                    squashed_inst->seqNum, numFreeEntries());
+            IQUnit *iq = squashed_inst->iq;
             squashed_inst->clearInIQ();
+            if (iq) {
+                iq->remove(squashed_inst);
+            }
+            DPRINTF(IQ,
+                    "STT/debug: IQ squash-path post-remove [sn:%llu] free=%u\n",
+                    squashed_inst->seqNum, numFreeEntries());
         }
 
-        // IQ clears out the heads of the dependency graph only when
-        // instructions reach writeback stage. If an instruction is squashed
-        // before writeback stage, its head of dependency graph would not be
-        // cleared out; it holds the instruction's DynInstPtr. This
-        // prevents freeing the squashed instruction's DynInst.
-        // Thus, we need to manually clear out the squashed instructions'
-        // heads of dependency graph.
         for (int dest_reg_idx = 0;
              dest_reg_idx < squashed_inst->numDestRegs();
              dest_reg_idx++)
@@ -1453,8 +1413,6 @@ InstructionQueue::PqCompare::operator()(
 bool
 InstructionQueue::addToDependents(const DynInstPtr &new_inst)
 {
-    // Loop through the instruction's source registers, adding
-    // them to the dependency list if they are not ready.
     int8_t total_src_regs = new_inst->numSrcRegs();
     bool return_val = false;
 
@@ -1462,14 +1420,9 @@ InstructionQueue::addToDependents(const DynInstPtr &new_inst)
          src_reg_idx < total_src_regs;
          src_reg_idx++)
     {
-        // Only add it to the dependency graph if it's not ready.
         if (!new_inst->readySrcIdx(src_reg_idx)) {
             PhysRegIdPtr src_reg = new_inst->renamedSrcIdx(src_reg_idx);
 
-            // Check the IQ's scoreboard to make sure the register
-            // hasn't become ready while the instruction was in flight
-            // between stages.  Only if it really isn't ready should
-            // it be added to the dependency graph.
             if (src_reg->isAlwaysReady()) {
                 continue;
             } else if (!regScoreboard[src_reg->flatIndex()]) {
@@ -1480,15 +1433,12 @@ InstructionQueue::addToDependents(const DynInstPtr &new_inst)
 
                 dependGraph.insert(src_reg->flatIndex(), new_inst);
 
-                // Change the return value to indicate that something
-                // was added to the dependency graph.
                 return_val = true;
             } else {
                 DPRINTF(IQ, "Instruction PC %s has src reg %i (%s) that "
                         "became ready before it reached the IQ.\n",
                         new_inst->pcState(), src_reg->index(),
                         src_reg->className());
-                // Mark a register ready within the instruction.
                 new_inst->markSrcRegReady(src_reg_idx);
             }
         }
@@ -1500,10 +1450,6 @@ InstructionQueue::addToDependents(const DynInstPtr &new_inst)
 void
 InstructionQueue::addToProducers(const DynInstPtr &new_inst)
 {
-    // Nothing really needs to be marked when an instruction becomes
-    // the producer of a register's value, but for convenience a ptr
-    // to the producing instruction will be placed in the head node of
-    // the dependency links.
     int8_t total_dest_regs = new_inst->numDestRegs();
 
     for (int dest_reg_idx = 0;
@@ -1512,8 +1458,6 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
     {
         PhysRegIdPtr dest_reg = new_inst->renamedDestIdx(dest_reg_idx);
 
-        // Some registers have fixed mapping, and there is no need to track
-        // dependencies as these instructions must be executed at commit.
         if (dest_reg->isAlwaysReady()) {
             continue;
         }
@@ -1527,7 +1471,6 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
 
         dependGraph.setInst(dest_reg->flatIndex(), new_inst);
 
-        // Mark the scoreboard to say it's not yet ready.
         regScoreboard[dest_reg->flatIndex()] = false;
     }
 }
@@ -1535,17 +1478,12 @@ InstructionQueue::addToProducers(const DynInstPtr &new_inst)
 void
 InstructionQueue::addIfReady(const DynInstPtr &inst)
 {
-    // If the instruction now has all of its source registers
-    // available, then add it to the list of ready instructions.
     if (inst->readyToIssue()) {
 
-        //Add the instruction to the proper ready list.
         if (inst->isMemRef()) {
 
             DPRINTF(IQ, "Checking if memory instruction can issue.\n");
 
-            // Message to the mem dependence unit that this instruction has
-            // its registers ready.
             memDepUnit[inst->threadNumber].regsReady(inst);
 
             return;
@@ -1561,8 +1499,6 @@ InstructionQueue::addIfReady(const DynInstPtr &inst)
 
         readyInsts[op_class].push(inst);
 
-        // Will need to reorder the list if either a queue is not on the list,
-        // or it has an older instruction than last time.
         if (!queueOnList[op_class]) {
             addToOrderList(op_class);
         } else if (readyInsts[op_class].top()->seqNum  <
@@ -1631,8 +1567,6 @@ InstructionQueue::dumpInsts()
                     cprintf("Count:%i\n", valid_num);
                 } else if ((*inst_list_it)->isMemRef() &&
                            !(*inst_list_it)->memOpDone()) {
-                    // Loads that have not been marked as executed
-                    // still count towards the total instructions.
                     ++valid_num;
                     cprintf("Count:%i\n", valid_num);
                 }
@@ -1673,8 +1607,6 @@ InstructionQueue::dumpInsts()
                 cprintf("Count:%i\n", valid_num);
             } else if ((*inst_list_it)->isMemRef() &&
                        !(*inst_list_it)->memOpDone()) {
-                // Loads that have not been marked as executed
-                // still count towards the total instructions.
                 ++valid_num;
                 cprintf("Count:%i\n", valid_num);
             }

@@ -7,7 +7,7 @@
  * The license below extends only to copyright in the software and shall
  * not be construed as granting a license to any other intellectual
  * property including but not limited to intellectual property relating
- * to a hardware implementation of the functionality of the software
+ * to a hardware implementation of the software
  * licensed hereunder.  You may use the software subject to the license
  * terms below provided that you ensure that this notice is replicated
  * unmodified and in its entirety in all distributions of the software,
@@ -46,6 +46,7 @@
 
 #include <iostream>
 #include <list>
+#include <map>
 #include <queue>
 #include <set>
 #include <unordered_map>
@@ -101,6 +102,12 @@ class CPU : public BaseCPU
 
     friend class ThreadContext;
 
+    bool shouldBlockExplicitMemAccess(const DynInstPtr &inst) const;
+    bool shouldUseImplicitPolicy(const DynInstPtr &inst) const;
+    bool shouldUseExplicitPolicy(const DynInstPtr &inst) const;
+    bool shouldUseFuturisticPolicy(const DynInstPtr &inst) const;
+    bool shouldIsolateSpeculativeTransmitter(const DynInstPtr &inst) const;
+
   public:
     enum Status
     {
@@ -121,12 +128,13 @@ class CPU : public BaseCPU
     Status _status;
 
     bool sttEnabled;
-    std::unordered_map<PhysRegIdPtr, bool> regTaint;
-    std::unordered_map<InstSeqNum, std::vector<PhysRegIdPtr>>
-        instTaintedDestRegs;
     bool implicitChannelEnabled;
     bool explicitChannelEnabled;
     bool futuristicModelEnabled;
+
+    std::unordered_map<PhysRegIdPtr, bool> regTaint;
+    std::unordered_map<InstSeqNum, std::vector<PhysRegIdPtr>>
+        instTaintedDestRegs;
 
   private:
     /** The tick event used for scheduling CPU ticks. */
