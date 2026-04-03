@@ -1060,6 +1060,15 @@ Commit::commitInsts()
                 if (head_inst->isSquashAfter())
                     squashAfter(tid, head_inst);
 
+                // STT: once a tainted control instruction commits, squash all younger
+                // instructions and restart fetch from the architectural next PC.
+                if (head_inst->isCondCtrl() && head_inst->isControlTainted()) {
+                    DPRINTF(Commit,
+                            "[tid:%i] [sn:%llu] STT: committed tainted control; squashing younger instructions after commit\n",
+                            tid, head_inst->seqNum);
+                    squashAfter(tid, head_inst);
+                }
+
                 if (drainPending) {
                     if (pc[tid]->microPC() == 0 && interrupt == NoFault &&
                         !thread[tid]->trapPending) {
@@ -1132,8 +1141,6 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
 
     ThreadID tid = head_inst->threadNumber;
 
-    // If the instruction is not executed yet, then it will need extra
-    // handling. Signal backwards that it should be executed.
     if (!head_inst->isExecuted()) {
         assert(head_inst->isNonSpeculative() || head_inst->isStoreConditional()
                || head_inst->isReadBarrier() || head_inst->isWriteBarrier()
@@ -1155,9 +1162,6 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         }
 
         toIEW->commitInfo[tid].nonSpecSeqNum = head_inst->seqNum;
-
-        // Change the instruction so it won't try to commit again until
-        // it is executed.
         head_inst->clearCanCommit();
 
         if (head_inst->isLoad() && head_inst->strictlyOrdered()) {
@@ -1173,11 +1177,8 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         return false;
     }
 
-    // Check if the instruction caused a fault. If so, trap.
     Fault inst_fault = head_inst->getFault();
 
-    // hardware transactional memory
-    // if a fault occurred within a HTM transaction ensure that the transaction aborts
     if (inst_fault != NoFault && head_inst->inHtmTransactionalState()) {
         if (!std::dynamic_pointer_cast<GenericHtmFailureFault>(inst_fault)) {
             DPRINTF(HtmCpu, "%s - fault (%s) encountered within transaction"
@@ -1189,7 +1190,6 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         }
     }
 
-    // Stores mark themselves as completed.
     if (!head_inst->isStore() && inst_fault == NoFault) {
         head_inst->setCompleted();
     }
@@ -1198,13 +1198,35 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         DPRINTF(Commit, "Inst [tid:%i] [sn:%llu] PC %s has a fault\n",
                 tid, head_inst->seqNum, head_inst->pcState());
 
+        DPRINTF(Commit,
+            "[tid:%i] [sn:%llu] HEAD_FAULT pc=%s fault=%s\n",
+            tid,
+            head_inst->seqNum,
+            head_inst->pcState(),
+            inst_fault->name());
+
+        DPRINTF(Commit,
+    "[tid:%i] [sn:%llu] FAULT_WAIT pc=%s fault=%s "
+    "executed=%d canCommit=%d squashed=%d storesOutstanding=%d inst_num=%u\n",
+    tid,
+    head_inst->seqNum,
+    head_inst->pcState(),
+    inst_fault->name(),
+    head_inst->isExecuted(),
+    head_inst->readyToCommit(),
+    head_inst->isSquashed(),
+    iewStage->hasStoresToWB(tid),
+    inst_num);
+
         if (iewStage->hasStoresToWB(tid) || inst_num > 0) {
-            DPRINTF(Commit,
-                    "[tid:%i] [sn:%llu] "
-                    "Stores outstanding, fault must wait.\n",
-                    tid, head_inst->seqNum);
-            return false;
-        }
+    DPRINTF(Commit,
+        "[tid:%i] [sn:%llu] fault wait reason: storesOutstanding=%d inst_num=%u\n",
+        tid,
+        head_inst->seqNum,
+        iewStage->hasStoresToWB(tid),
+        inst_num);
+    return false;
+}
 
         head_inst->setCompleted();
 
@@ -1256,7 +1278,6 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
                 tid, head_inst->seqNum, head_inst->pcState());
     }
 
-    // Update the commit rename map
     for (int i = 0; i < head_inst->numDestRegs(); i++) {
         renameMap[tid]->setEntry(head_inst->flattenedDestIdx(i),
                                  head_inst->renamedDestIdx(i));
@@ -1284,12 +1305,9 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         cpu->clearInstTaintedDestRegs(head_inst->seqNum);
     }
 
-    // hardware transactional memory
-    // the HTM UID is purely for correctness and debugging purposes
     if (head_inst->isHtmStart())
         iewStage->setLastRetiredHtmUid(tid, head_inst->getHtmTransactionUid());
 
-    // Finally clear the head ROB entry.
     rob->retireHead(tid);
 
     if (head_inst->isCondCtrl() &&

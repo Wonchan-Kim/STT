@@ -56,7 +56,11 @@ MemDepUnit::MemDepUnit()
       sttEnabled(false),
       implicitChannelEnabled(false),
       stats(nullptr)
-{}
+{
+    for (ThreadID tid = 0; tid < MaxThreads; ++tid) {
+        latestStoreLikeSeqNum[tid] = 0;
+    }
+}
 
 MemDepUnit::MemDepUnit(const BaseO3CPUParams &params)
     : _name(params.name + ".memdepunit"),
@@ -68,24 +72,23 @@ MemDepUnit::MemDepUnit(const BaseO3CPUParams &params)
       implicitChannelEnabled(params.implicitChannel),
       stats(nullptr)
 {
+    for (ThreadID tid = 0; tid < MaxThreads; ++tid) {
+        latestStoreLikeSeqNum[tid] = 0;
+    }
+
     DPRINTF(MemDepUnit, "Creating MemDepUnit object.\n");
 }
 
 MemDepUnit::~MemDepUnit()
 {
     for (ThreadID tid = 0; tid < MaxThreads; tid++) {
-
         ListIt inst_list_it = instList[tid].begin();
-
         MemDepHashIt hash_it;
 
         while (!instList[tid].empty()) {
             hash_it = memDepHash.find((*inst_list_it)->seqNum);
-
             assert(hash_it != memDepHash.end());
-
             memDepHash.erase(hash_it);
-
             instList[tid].erase(inst_list_it++);
         }
     }
@@ -103,9 +106,9 @@ MemDepUnit::init(const BaseO3CPUParams &params, ThreadID tid, CPU *cpu)
     DPRINTF(MemDepUnit, "Creating MemDepUnit %i object.\n", tid);
 
     id = tid;
-
     sttEnabled = params.stt;
     implicitChannelEnabled = params.implicitChannel;
+    latestStoreLikeSeqNum[tid] = 0;
 
     depPred.init(params.store_set_clear_period,
                  params.SSITSize, params.SSITAssoc, params.SSITReplPolicy,
@@ -157,6 +160,10 @@ MemDepUnit::takeOverFrom()
     loadBarrierSNs.clear();
     storeBarrierSNs.clear();
     depPred.clear();
+
+    for (ThreadID tid = 0; tid < MaxThreads; ++tid) {
+        latestStoreLikeSeqNum[tid] = 0;
+    }
 }
 
 void
@@ -213,25 +220,6 @@ MemDepUnit::insert(const DynInstPtr &inst)
     instList[tid].push_back(inst);
     inst_entry->listIt = --(instList[tid].end());
 
-    std::vector<InstSeqNum> producing_stores;
-    if ((inst->isLoad() || inst->isAtomic()) && hasLoadBarrier()) {
-        DPRINTF(MemDepUnit, "%d load barriers in flight\n",
-                loadBarrierSNs.size());
-        producing_stores.insert(std::end(producing_stores),
-                                std::begin(loadBarrierSNs),
-                                std::end(loadBarrierSNs));
-    } else if ((inst->isStore() || inst->isAtomic()) && hasStoreBarrier()) {
-        DPRINTF(MemDepUnit, "%d store barriers in flight\n",
-                storeBarrierSNs.size());
-        producing_stores.insert(std::end(producing_stores),
-                                std::begin(storeBarrierSNs),
-                                std::end(storeBarrierSNs));
-    } else {
-        InstSeqNum dep = depPred.checkInst(inst->pcState().instAddr());
-        if (dep != 0)
-            producing_stores.push_back(dep);
-    }
-
     bool sttConservativeMemDep =
         sttEnabled &&
         implicitChannelEnabled &&
@@ -241,62 +229,80 @@ MemDepUnit::insert(const DynInstPtr &inst)
          inst->isDataTainted() ||
          inst->isAddrTainted());
 
-    if (sttConservativeMemDep) {
+    MemDepEntryPtr producer_entry = nullptr;
+    int producer_count = 0;
+
+    // Barrier path can genuinely have multiple producers.
+    if ((inst->isLoad() || inst->isAtomic()) && hasLoadBarrier()) {
+        DPRINTF(MemDepUnit, "%d load barriers in flight\n",
+                loadBarrierSNs.size());
+
+        for (auto producing_store : loadBarrierSNs) {
+            DPRINTF(MemDepUnit, "Searching for producer [sn:%lli]\n",
+                    producing_store);
+            MemDepHashIt hash_it = memDepHash.find(producing_store);
+            if (hash_it != memDepHash.end()) {
+                if (!producer_entry) {
+                    producer_entry = (*hash_it).second;
+                }
+                producer_count++;
+                DPRINTF(MemDepUnit, "Producer found\n");
+            }
+        }
+
+    } else if ((inst->isStore() || inst->isAtomic()) && hasStoreBarrier()) {
+        DPRINTF(MemDepUnit, "%d store barriers in flight\n",
+                storeBarrierSNs.size());
+
+        for (auto producing_store : storeBarrierSNs) {
+            DPRINTF(MemDepUnit, "Searching for producer [sn:%lli]\n",
+                    producing_store);
+            MemDepHashIt hash_it = memDepHash.find(producing_store);
+            if (hash_it != memDepHash.end()) {
+                if (!producer_entry) {
+                    producer_entry = (*hash_it).second;
+                }
+                producer_count++;
+                DPRINTF(MemDepUnit, "Producer found\n");
+            }
+        }
+
+    } else if (sttConservativeMemDep) {
+        // Fast STT path: directly use the latest remembered store-like producer.
         DPRINTF(MemDepUnit,
                 "STT: considering conservative mem-dep handling for [sn:%lli] PC %s\n",
                 inst->seqNum, inst->pcState());
 
-        if (producing_stores.empty()) {
-            InstSeqNum latest_producer = 0;
-            bool found_latest = false;
+        InstSeqNum latest_producer = latestStoreLikeSeqNum[tid];
 
-            for (auto list_it = instList[tid].begin();
-                 list_it != instList[tid].end(); ++list_it) {
-                const DynInstPtr &older_inst = *list_it;
+        if (latest_producer != 0 && latest_producer < inst->seqNum) {
+            DPRINTF(MemDepUnit,
+                    "STT: forcing conservative mem-dep on [sn:%lli] with latest older producer [sn:%lli]\n",
+                    inst->seqNum, latest_producer);
 
-                if (older_inst == inst)
-                    continue;
-
-                if (older_inst->seqNum >= inst->seqNum)
-                    continue;
-
-                if (older_inst->isStore() ||
-                    older_inst->isAtomic() ||
-                    older_inst->isReadBarrier() ||
-                    older_inst->isWriteBarrier() ||
-                    older_inst->isHtmCmd()) {
-
-                    if (!found_latest || older_inst->seqNum > latest_producer) {
-                        latest_producer = older_inst->seqNum;
-                        found_latest = true;
-                    }
-                }
+            MemDepHashIt hash_it = memDepHash.find(latest_producer);
+            if (hash_it != memDepHash.end()) {
+                producer_entry = (*hash_it).second;
+                producer_count = 1;
+                DPRINTF(MemDepUnit, "Producer found\n");
             }
+        }
 
-            if (found_latest) {
-                producing_stores.push_back(latest_producer);
-
-                DPRINTF(MemDepUnit,
-                        "STT: forcing conservative mem-dep on [sn:%lli] with latest older producer [sn:%lli]\n",
-                        inst->seqNum, latest_producer);
+    } else {
+        // Normal StoreSet predictor path
+        InstSeqNum dep = depPred.checkInst(inst->pcState().instAddr());
+        if (dep != 0) {
+            DPRINTF(MemDepUnit, "Searching for producer [sn:%lli]\n", dep);
+            MemDepHashIt hash_it = memDepHash.find(dep);
+            if (hash_it != memDepHash.end()) {
+                producer_entry = (*hash_it).second;
+                producer_count = 1;
+                DPRINTF(MemDepUnit, "Producer found\n");
             }
         }
     }
 
-    std::vector<MemDepEntryPtr> store_entries;
-
-    for (auto producing_store : producing_stores) {
-        DPRINTF(MemDepUnit, "Searching for producer [sn:%lli]\n",
-                producing_store);
-        MemDepHashIt hash_it = memDepHash.find(producing_store);
-
-        if (hash_it != memDepHash.end()) {
-            store_entries.push_back((*hash_it).second);
-            DPRINTF(MemDepUnit, "Producer found\n");
-        }
-    }
-
-    if (store_entries.empty()) {
+    if (producer_count == 0) {
         DPRINTF(MemDepUnit, "No dependency for inst PC "
                 "%s [sn:%lli].\n", inst->pcState(), inst->seqNum);
 
@@ -308,10 +314,6 @@ MemDepUnit::insert(const DynInstPtr &inst)
         }
     } else {
         DPRINTF(MemDepUnit, "Adding to dependency list\n");
-        for ([[maybe_unused]] auto producing_store : producing_stores) {
-            DPRINTF(MemDepUnit, "\tinst PC %s is dependent on [sn:%lli].\n",
-                    inst->pcState(), producing_store);
-        }
 
         if (inst->readyToIssue()) {
             inst_entry->regsReady = true;
@@ -319,10 +321,37 @@ MemDepUnit::insert(const DynInstPtr &inst)
 
         inst->clearCanIssue();
 
-        for (auto store_entry : store_entries)
-            store_entry->dependInsts.push_back(inst_entry);
+        if (producer_count == 1) {
+            DPRINTF(MemDepUnit,
+                    "\tinst PC %s is dependent on one producer.\n",
+                    inst->pcState());
+            producer_entry->dependInsts.push_back(inst_entry);
+        } else {
+            if ((inst->isLoad() || inst->isAtomic()) && hasLoadBarrier()) {
+                for (auto producing_store : loadBarrierSNs) {
+                    DPRINTF(MemDepUnit,
+                            "\tinst PC %s is dependent on [sn:%lli].\n",
+                            inst->pcState(), producing_store);
+                    MemDepHashIt hash_it = memDepHash.find(producing_store);
+                    if (hash_it != memDepHash.end()) {
+                        (*hash_it).second->dependInsts.push_back(inst_entry);
+                    }
+                }
+            } else if ((inst->isStore() || inst->isAtomic()) &&
+                       hasStoreBarrier()) {
+                for (auto producing_store : storeBarrierSNs) {
+                    DPRINTF(MemDepUnit,
+                            "\tinst PC %s is dependent on [sn:%lli].\n",
+                            inst->pcState(), producing_store);
+                    MemDepHashIt hash_it = memDepHash.find(producing_store);
+                    if (hash_it != memDepHash.end()) {
+                        (*hash_it).second->dependInsts.push_back(inst_entry);
+                    }
+                }
+            }
+        }
 
-        inst_entry->memDeps = store_entries.size();
+        inst_entry->memDeps = producer_count;
 
         if (inst->isLoad()) {
             ++stats.conflictingLoads;
@@ -332,6 +361,15 @@ MemDepUnit::insert(const DynInstPtr &inst)
     }
 
     insertBarrierSN(inst);
+
+    // Update latest store-like producer cache after this instruction is inserted.
+    if (inst->isStore() ||
+        inst->isAtomic() ||
+        inst->isReadBarrier() ||
+        inst->isWriteBarrier() ||
+        inst->isHtmCmd()) {
+        latestStoreLikeSeqNum[tid] = inst->seqNum;
+    }
 
     if (inst->isStore() || inst->isAtomic()) {
         DPRINTF(MemDepUnit, "Inserting store/atomic PC %s [sn:%lli].\n",
@@ -385,6 +423,12 @@ MemDepUnit::insertBarrier(const DynInstPtr &barr_inst)
     inst_entry->listIt = --(instList[tid].end());
 
     insertBarrierSN(barr_inst);
+
+    if (barr_inst->isReadBarrier() ||
+        barr_inst->isWriteBarrier() ||
+        barr_inst->isHtmCmd()) {
+        latestStoreLikeSeqNum[tid] = barr_inst->seqNum;
+    }
 }
 
 void
@@ -451,7 +495,6 @@ MemDepUnit::replay()
                 temp_inst->pcState(), temp_inst->seqNum);
 
         moveToReady(*inst_entry);
-
         instsToReplay.pop_front();
     }
 }
@@ -465,11 +508,11 @@ MemDepUnit::completed(const DynInstPtr &inst)
     inst->isExplicitShadowedStore(),
     inst->isExecuted(),
     inst->isSquashed());
+
     DPRINTF(MemDepUnit, "Completed mem instruction PC %s [sn:%lli].\n",
             inst->pcState(), inst->seqNum);
 
     ThreadID tid = inst->threadNumber;
-
     MemDepHashIt hash_it = memDepHash.find(inst->seqNum);
 
     if (hash_it == memDepHash.end()) {
@@ -480,6 +523,12 @@ MemDepUnit::completed(const DynInstPtr &inst)
     }
 
     instList[tid].erase((*hash_it).second->listIt);
+
+    // If this instruction was the cached latest producer, invalidate cache.
+    // Simplicity-first: fall back to 0 so future STT inserts safely degrade.
+    if (latestStoreLikeSeqNum[tid] == inst->seqNum) {
+        latestStoreLikeSeqNum[tid] = 0;
+    }
 
     (*hash_it).second = NULL;
     memDepHash.erase(hash_it);
@@ -503,6 +552,7 @@ MemDepUnit::completeInst(const DynInstPtr &inst)
         assert(hasLoadBarrier());
         loadBarrierSNs.erase(barr_sn);
     }
+
     if (debug::MemDepUnit) {
         const char *barrier_type = nullptr;
         if (inst->isWriteBarrier() && inst->isReadBarrier())
@@ -611,8 +661,11 @@ MemDepUnit::squash(const InstSeqNum &squashed_num, ThreadID tid)
         loadBarrierSNs.erase((*squash_it)->seqNum);
         storeBarrierSNs.erase((*squash_it)->seqNum);
 
-        hash_it = memDepHash.find((*squash_it)->seqNum);
+        if (latestStoreLikeSeqNum[tid] == (*squash_it)->seqNum) {
+            latestStoreLikeSeqNum[tid] = 0;
+        }
 
+        hash_it = memDepHash.find((*squash_it)->seqNum);
         assert(hash_it != memDepHash.end());
 
         (*hash_it).second->squashed = true;
