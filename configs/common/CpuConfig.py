@@ -75,3 +75,16 @@ def config_etrace(cpu_cls, cpu_list, options):
             " type or inherited from DerivO3CPU.",
             cpu_cls,
         )
+
+# STT Configuration
+def config_scheme(cpu_cls, cpu_list, options):
+    # Only to O3 CPUs
+    if issubclass(cpu_cls, m5.objects.DerivO3CPU):
+        for cpu in cpu_list:
+            cpu.stt = bool(options.STT)
+            cpu.implicitChannel = bool(options.implicit_channel)
+            cpu.explicitChannel = bool(options.explicit_channel)
+            cpu.futuristicModel = bool(options.futuristic_model)
+
+    else:
+        print("not DerivO3CPU")

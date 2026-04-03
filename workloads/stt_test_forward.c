@@ -12,6 +12,5 @@ int main(void) {
         asm volatile("" : : "r"(x) : "memory");
     }
 
-    printf("x=%llu\n", (unsigned long long)x);
-    return 0;
+    return (int)x;
 }
