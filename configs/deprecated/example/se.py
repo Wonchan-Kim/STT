@@ -221,11 +221,18 @@ if args.elastic_trace_en:
 for cpu in system.cpu:
     cpu.clk_domain = system.cpu_clk_domain
 
+stt_on = os.getenv("STT", "1") == "1"
+implicit_on = os.getenv("IMPLICIT", "1") == "1"
+explicit_on = os.getenv("EXPLICIT", "0") == "1"
+futuristic_on = os.getenv("FUTURISTIC", "1") == "1"
+
 for cpu in system.cpu:
     cpu.stt = True
     cpu.implicitChannel = True
     cpu.explicitChannel = False
     cpu.futuristicModel = True
+
+print("STT config:", stt_on, implicit_on, explicit_on, futuristic_on)
     
 if ObjectList.is_kvm_cpu(CPUClass) or ObjectList.is_kvm_cpu(FutureClass):
     if buildEnv["USE_X86_ISA"]:

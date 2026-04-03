@@ -366,8 +366,49 @@ class LSQUnit
     unsigned getCount() { return loadQueue.size() + storeQueue.size(); }
 
     /** Returns if there are any stores to writeback. */
-    bool hasStoresToWB() { return storesToWB; }
+bool hasStoresToWB() const
+{
+    if (isStoreBlocked) {
+        DPRINTF(LSQUnit,
+                "STT/hasStoresToWB: true because isStoreBlocked=1\n");
+        return true;
+    }
 
+    if (storeInFlight) {
+        DPRINTF(LSQUnit,
+                "STT/hasStoresToWB: true because storeInFlight=1\n");
+        return true;
+    }
+
+    for (auto it = storeQueue.begin(); it != storeQueue.end(); ++it) {
+        if (it->valid() && it->canWB() && !it->completed() && it->size() == 0) {
+    DPRINTF(LSQUnit,
+            "STT/hasStoresToWB: ignoring zero-size SQ entry idx=%d "
+            "canWB=%d completed=%d committed=%d\n",
+            it.idx(),
+            it->canWB(),
+            it->completed(),
+            it->committed());
+}
+
+        if (it->valid() &&
+            it->canWB() &&
+            !it->completed() &&
+            it->size() > 0) {
+            DPRINTF(LSQUnit,
+                    "STT/hasStoresToWB: true because SQ entry idx=%d "
+                    "canWB=%d completed=%d size=%d committed=%d\n",
+                    it.idx(),
+                    it->canWB(),
+                    it->completed(),
+                    it->size(),
+                    it->committed());
+            return true;
+        }
+    }
+
+    return false;
+}
     /** Returns the number of stores to writeback. */
     int numStoresToWB() { return storesToWB; }
 
