@@ -230,19 +230,20 @@ for cpu in system.cpu:
 # Configure STT / simulation scheme for O3 CPUs
 if issubclass(CPUClass, DerivO3CPU):
     CpuConfig.config_scheme(CPUClass, system.cpu, args)
-    
-stt_on = os.getenv("STT", "1") == "1"
-implicit_on = os.getenv("IMPLICIT", "1") == "1"
-explicit_on = os.getenv("EXPLICIT", "0") == "1"
-futuristic_on = os.getenv("FUTURISTIC", "1") == "1"
 
 for cpu in system.cpu:
-    cpu.stt = stt_on
-    cpu.implicitChannel = implicit_on
-    cpu.explicitChannel = explicit_on
-    cpu.futuristicModel = futuristic_on
+    cpu.stt = bool(args.STT)
+    cpu.implicitChannel = bool(args.implicit_channel)
+    cpu.explicitChannel = bool(args.explicit_channel)
+    cpu.futuristicModel = bool(args.futuristic_model)
 
-print("STT config:", stt_on, implicit_on, explicit_on, futuristic_on)
+print(
+    "STT config:",
+    bool(args.STT),
+    bool(args.implicit_channel),
+    bool(args.explicit_channel),
+    bool(args.futuristic_model),
+)
     
 if ObjectList.is_kvm_cpu(CPUClass) or ObjectList.is_kvm_cpu(FutureClass):
     if buildEnv["USE_X86_ISA"]:
