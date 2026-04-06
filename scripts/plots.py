@@ -81,15 +81,18 @@ def plot_normalized(pivot_df):
     labels = pivot_df["benchmark"]
     values = pivot_df["normalized"]
 
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    plt.bar(labels, values, width=0.5)
+    bar_container = ax.bar(labels, values, width=0.5, alpha=0.7)
 
-    plt.axhline(1.0, color="red", linestyle="--", linewidth=1.5)  
+    ax.axhline(1.0, color="red", linestyle="--", linewidth=1.5)
 
-    plt.xlabel("Benchmark")
-    plt.ylabel("Normalized Execution Time (Cycles / Baseline)")
-    plt.title("Normalized STT Performance")
+    # 🔹 Add labels on bars
+    ax.bar_label(bar_container, fmt="%.2f")
+
+    ax.set_xlabel("Benchmark")
+    ax.set_ylabel("Normalized Execution Time (Cycles / Baseline)")
+    ax.set_title("Normalized STT Performance")
 
     plt.tight_layout()
     plt.savefig(PLOTS_DIR / "normalized_execution_time.png", dpi=300)
@@ -122,6 +125,11 @@ def plot_ipc(df):
 if __name__ == "__main__":
     df = get_data()
     plot_ipc(df)
-
+    print("==== Raw data ====")
+    print(df)
+    
     pivot_df = compute_normalized(df)
+    print("")
+    print("==== Norm data ====")
+    print(pivot_df)
     plot_normalized(pivot_df)

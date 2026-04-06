@@ -14,7 +14,7 @@ LOG_DIR="$RUNS_DIR/logs"
 mkdir -p "$RUNS_DIR" "$LOG_DIR"
 
 # ===== SETTINGS =====
-INST_LIMIT=1000000
+INST_LIMIT=15000000
 
 # ===== CHECK FILES =====
 if [ ! -f "$GEM5_BIN" ]; then

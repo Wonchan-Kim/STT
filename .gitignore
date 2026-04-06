@@ -42,12 +42,8 @@ typings
 # SPEC
 spec2017
 
-# Ignore run outputs
-runs/
-*.out
-m5out/
-
 # generated outputs
+1M_runs/
 runs/
 *.out
 m5out/
