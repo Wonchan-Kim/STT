@@ -1,4 +1,7 @@
 #!/bin/bash
+# ============================
+# RUNNING SIMPLE TEST PROGRAM
+# ============================
 
 set -e
 
@@ -61,13 +64,18 @@ run_case() {
     "$GEM5_BIN" \
         --outdir="$OUTDIR" \
         "$CONFIG" \
-        --cpu-type=DerivO3CPU \
+        --num-cpus=1 \
+        --mem-size=4GB \
         --caches \
-        --cmd="$WORKLOAD_BIN" \
-        --STT="$STT_FLAG" \
-        --implicit_channel="$IMPLICIT_FLAG" \
-        --explicit_channel="$EXPLICIT_FLAG" \
-        --futuristic_model="$FUTURISTIC_FLAG" \
+        --l2cache \
+        --cpu-type=DerivO3CPU \
+        -I 1000000 \
+        -c "$BIN_PATH" \
+        -o "inp.in" \
+        --STT=0 \
+        --implicit_channel=0 \
+        --explicit_channel=0 \
+        --futuristic_model=0 \
         > "$LOGFILE" 2>&1
 
     if [ $? -ne 0 ]; then
