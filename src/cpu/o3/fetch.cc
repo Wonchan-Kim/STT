@@ -1108,9 +1108,7 @@ Fetch::buildInst(ThreadID tid, StaticInstPtr staticInst,
 void
 Fetch::fetch(bool &status_change)
 {
-    //////////////////////////////////////////
-    // Start actual fetch
-    //////////////////////////////////////////
+   
     ThreadID tid = getFetchingThread();
 
     assert(!cpu->switchedOut());
@@ -1507,11 +1505,8 @@ Fetch::recvReqRetry()
     }
 }
 
-///////////////////////////////////////
-//                                   //
+
 //  SMT FETCH POLICY MAINTAINED HERE //
-//                                   //
-///////////////////////////////////////
 ThreadID
 Fetch::getFetchingThread()
 {

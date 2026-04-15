@@ -1363,13 +1363,10 @@ if (counted_as_wb) {
     --storesToWB;
 }
 
-    // A bit conservative because a store completion may not free up entries,
-    // but hopefully avoids two store completions in one cycle from making
-    // the CPU tick twice.
     cpu->wakeCPU();
     cpu->activityThisCycle();
 
-    /* We need a copy here because we may clear the entry from the store queue. */
+
     DynInstPtr store_inst = store_idx->instruction();
 
     bool removed_head = (store_idx == storeQueue.begin());

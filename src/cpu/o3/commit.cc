@@ -984,9 +984,7 @@ Commit::commitInsts()
             ++stats.commitSquashedInsts;
             ppSquash->notify(head_inst);
             changedROBNumEntries[tid] = true;
-        // Inst at head of ROB cannot execute because the CPU
-        // does not know how to (lack of FU). This is a misconfiguration,
-        // so panic.
+        
         } else if (head_inst->noCapableFU() &&
             head_inst->getFault() == NoFault)  {
             panic("CPU cannot execute [sn:%llu] op_class: %s but"
@@ -1033,8 +1031,7 @@ Commit::commitInsts()
                 if (tid == 0)
                     canHandleInterrupts = !head_inst->isDelayedCommit();
 
-                // at this point store conditionals should either have
-                // been completed or predicated false
+              
                 assert(!head_inst->isStoreConditional() ||
                        head_inst->isCompleted() ||
                        !head_inst->readPredicate());
@@ -1072,9 +1069,7 @@ Commit::commitInsts()
                 if (drainPending) {
                     if (pc[tid]->microPC() == 0 && interrupt == NoFault &&
                         !thread[tid]->trapPending) {
-                        // Last architectually committed instruction.
-                        // Squash the pipeline, stall fetch, and use
-                        // drainImminent to disable interrupts
+                      
                         DPRINTF(Drain, "Draining: %i:%s\n", tid, *pc[tid]);
                         squashAfter(tid, head_inst);
                         cpu->commitDrained(tid);
@@ -1106,14 +1101,7 @@ Commit::commitInsts()
                     }
                 }
 
-                // Check if an instruction just enabled interrupts and we've
-                // previously had an interrupt pending that was not handled
-                // because interrupts were subsequently disabled before the
-                // pipeline reached a place to handle the interrupt. In that
-                // case squash now to make sure the interrupt is handled.
-                //
-                // If we don't do this, we might end up in a live lock
-                // situation.
+              
                 if (!interrupt && avoidQuiesceLiveLock &&
                     onInstBoundary && cpu->checkInterrupts(0))
                     squashAfter(tid, head_inst);
@@ -1463,21 +1451,14 @@ Commit::updateComInstStats(const DynInstPtr &inst)
     }
 }
 
-////////////////////////////////////////
-//                                    //
+
 //  SMT COMMIT POLICY MAINTAINED HERE //
-//                                    //
-////////////////////////////////////////
+
 ThreadID
 Commit::getCommittingThread()
 {
     if (numThreads > 1) {
-        // If a thread is exiting, we need to ensure that *all* of its
-        // instructions will be retired in this cycle, because the
-        // thread will be removed from the CPU at the end of this cycle.
-        // To ensure this, we prioritize committing from exiting threads
-        // before we consider other threads using the specified SMT
-        // commit policy.
+       
         for (ThreadID tid : *activeThreads) {
             if (cpu->isThreadExiting(tid) &&
                 !rob->isEmpty(tid) &&
